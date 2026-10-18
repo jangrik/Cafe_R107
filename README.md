@@ -1,8 +1,32 @@
-# Cafe R107 · Version 1.0.0
+# Cafe R107 · Version 1.0.2
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.2
+
+- Die vergrößerte Tasse der normalen Displayansicht zeigt **HH:MM** an,
+  sobald die Uhrzeit bekannt ist. Ohne gültige Uhrzeit bleibt die Tasse innen leer.
+- Drei Dampffäden bewegen sich im Sekundentakt. Nur die kleinen betroffenen
+  Bildbereiche werden neu gezeichnet, nicht jede Sekunde das gesamte Display.
+- Alle **60 Sekunden** erscheint für **5 Sekunden** eine Top-5-Liste.
+  Reihenfolge: **heute → dieser Monat → insgesamt → heute …**. Dazwischen
+  bleibt die normale Ansicht rund 55 Sekunden sichtbar. Erster Start nach
+  einer Minute; Start- und Buchungsbestätigungen haben Vorrang.
+- Bei einem Chipkontakt während der Rangliste erscheint sofort die normale
+  Buchungsbestätigung. RFID-Erfassung und Webserver laufen weiter.
+- Stornierte Bezüge werden nicht mitgezählt. Bei Gleichstand wird nach Name,
+  danach nach Person-ID sortiert. Es erscheinen nur Personen mit mindestens
+  einem Bezug im jeweiligen Zeitraum, maximal fünf.
+- Ohne Uhrzeit zeigen Tages-/Monatsrangliste einen Hinweis; die Gesamtliste
+  berücksichtigt auch undatierte Bezüge. Leere Listen werden erklärt.
+- Die größeren Hinweis- und Bestätigungsschriften aus 1.0.1 bleiben erhalten.
+- Version wird einheitlich aus `include/Domain.h` bezogen (auch im Web).
+
+**Update von 1.0.1:** `git pull`, anschließend nur Firmware bauen und hochladen
+(`pio run -t upload`). Kein LittleFS-Upload erforderlich; Webdateien,
+Konfiguration, Personen und Buchungen bleiben bestehen.
 
 ## Bedienung
 

@@ -1,5 +1,3 @@
-#define VERSION "1.0.1"
-
 #include <Arduino.h>
 #include <SPI.h>
 #include <WiFi.h>
@@ -18,6 +16,7 @@
 #include <set>
 #include <vector>
 #include "Domain.h"
+#include "DisplayLogic.h"
 
 namespace pins {
 constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
@@ -47,9 +46,11 @@ bool mounted=false, journalOK=true, readerOK=false, fmReady=false, ntpStarted=fa
 uint32_t lastId=0;
 uint32_t lastPoll=0, lastPresence=0, lastAccepted=0, displayAt=0, lastWifiRetry=0;
 bool latched=false, acceptedOnce=false;
-enum class Screen { Boot, Idle, Result };
+enum class Screen { Boot, Idle, Result, Ranking };
 Screen currentScreen=Screen::Boot;
-String lastNetworkLine;
+String lastNetworkLine, lastCupTime;
+uint64_t lastSteamSecond=UINT64_MAX;
+cafe::RankingCycle rankingCycle;
 
 uint64_t uptimeMs() { return static_cast<uint64_t>(esp_timer_get_time()/1000); }
 int64_t epochNow() { int64_t t=time(nullptr); return cafe::validTime(t) ? t : 0; }
@@ -101,16 +102,43 @@ void frame() {
   center("Cafe R107",14,3,CREAM); lcd.drawFastHLine(18,49,204,GOLD);
 }
 String networkLine() { return WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString(); }
+// Redraw only the clock/steam regions, avoiding a full-screen flash each second.
+String cupTime() { return cafe::dateKey(epochNow(),"%H:%M").c_str(); }
+void drawCupTime() {
+  digitalWrite(pins::RFID_CS,HIGH);
+  lcd.fillRect(64,105,94,35,BG);
+  lastCupTime=cupTime();
+  if(lastCupTime.length()) {
+    lcd.setTextSize(3); lcd.setTextColor(CREAM);
+    lcd.setCursor(66,112); lcd.print(lastCupTime);
+  }
+}
+void drawSteam() {
+  digitalWrite(pins::RFID_CS,HIGH);
+  lcd.fillRect(73,59,83,29,BG);
+  lastSteamSecond=uptimeMs()/1000;
+  static const int8_t sway[]={-3,0,3,0};
+  uint8_t phase=lastSteamSecond%4;
+  for(int i=0;i<3;i++) {
+    int x=88+i*24, bend=sway[(phase+i)%4];
+    lcd.drawLine(x,85,x+bend,78,CREAM);
+    lcd.drawLine(x+bend,78,x-bend,70,CREAM);
+    lcd.drawLine(x-bend,70,x,62,CREAM);
+  }
+}
 void idleScreen() {
-  frame(); lcd.drawRoundRect(87,85,59,39,5,CREAM); lcd.drawRoundRect(146,91,15,22,5,CREAM);
-  lcd.drawFastHLine(78,131,84,GOLD);
-  for(int x=101;x<=129;x+=14) { lcd.drawLine(x,76,x-3,68,CREAM); lcd.drawLine(x-3,68,x,60,CREAM); }
-  center("Zeit fuer Kaffee?",150,2,CREAM);
-  center(storageError.length() ? "Speicher pruefen!" : (readerOK ? "Bitte Chip vorhalten" : "RFID nicht bereit"),177,2,storageError.length()?ST77XX_RED:GOLD);
-  center(epochNow() ? "" : "Uhrzeit bitte im Browser setzen",195,1,GOLD);
-  lastNetworkLine=networkLine(); center(lastNetworkLine,218,1,CREAM);
+  frame();
+  // Wide enough for a five-character HH:MM at text size 3.
+  lcd.drawRoundRect(54,92,114,62,9,CREAM);
+  lcd.drawRoundRect(167,104,23,35,8,CREAM);
+  lcd.drawFastHLine(44,160,155,GOLD);
+  drawCupTime(); drawSteam();
+  center("Zeit fuer Kaffee?",173,2,CREAM);
+  center(storageError.length() ? "Speicher pruefen!" : (readerOK ? "Bitte Chip vorhalten" : "RFID nicht bereit"),197,2,storageError.length()?ST77XX_RED:GOLD);
+  lastNetworkLine=networkLine(); center(lastNetworkLine,224,1,CREAM);
   currentScreen=Screen::Idle;
 }
+
 void message(const String& title,const String& name,const String& detail1, const String& detail2, bool success) {
   frame(); uint16_t c=success?0x77AE:GOLD;
   center(title,75,2,c); center(lcdText(name),112,2,CREAM); 
@@ -226,6 +254,76 @@ int64_t recordEpoch(JsonDocument& d) {
   Anchor a; if(it!=anchors.end()) a=it->second;
   return cafe::anchoredEpoch(d["epoch"]|int64_t(0),d["uptime"].as<uint64_t>(),a.epoch,a.uptime);
 }
+String fitRankingName(const String& name,int maxWidth) {
+  String text=lcdText(name);
+  lcd.setTextSize(2);
+  int16_t x,y; uint16_t w,h;
+  lcd.getTextBounds(text,0,0,&x,&y,&w,&h);
+  if(w<=maxWidth) return text;
+  while(text.length()) {
+    text.remove(text.length()-1);
+    String shortened=text+".";
+    lcd.getTextBounds(shortened,0,0,&x,&y,&w,&h);
+    if(w<=maxWidth) return shortened;
+  }
+  return "";
+}
+void rankingScreen(cafe::RankingPeriod period) {
+  const char* label=period==cafe::RankingPeriod::Today ? "Heute" :
+                    period==cafe::RankingPeriod::Month ? "Dieser Monat" : "Insgesamt";
+  int64_t now=epochNow();
+  std::map<String,uint32_t> counts;
+  bool timeMissing=period!=cafe::RankingPeriod::All && !now;
+  bool readable=mounted && journalOK && !storageError.length();
+  if(readable && !timeMissing) {
+    readable=scanJournal([&](JsonDocument& e){
+      if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
+      if(cafe::inRankingPeriod(recordEpoch(e),now,period)) ++counts[e["person"].as<String>()];
+    });
+    if(!readable) { journalOK=false; storageError="Journal nicht lesbar"; }
+  }
+  std::vector<cafe::RankEntry> entries;
+  for(const auto& p:counts) entries.push_back({p.first.c_str(),personName(p.first).c_str(),p.second});
+  auto top=cafe::topFive(entries);
+  frame(); center(String("Top 5 - ")+label,65,2,GOLD);
+  if(!readable) {
+    center("Speicher pruefen!",117,2,ST77XX_RED);
+  } else if(timeMissing) {
+    center("Uhrzeit fehlt",117,2,CREAM);
+    center("Bitte im Browser setzen",151,1,GOLD);
+  } else if(top.empty()) {
+    center("Noch keine Kaffees",117,2,CREAM);
+    center("Zeit fuer eine kleine Pause?",151,1,GOLD);
+  } else {
+    for(size_t i=0;i<top.size();++i) {
+      int y=101+int(i)*23;
+      String amount=String(top[i].count);
+      lcd.setTextSize(2); int16_t x0,y0;uint16_t w,h;
+      lcd.getTextBounds(amount,0,0,&x0,&y0,&w,&h);
+      int countX=230-int(w);
+      lcd.setTextColor(GOLD);lcd.setCursor(10,y);lcd.print(int(i)+1);
+      lcd.setTextColor(CREAM);lcd.setCursor(34,y);
+      lcd.print(fitRankingName(top[i].name.c_str(),countX-42));
+      lcd.setTextColor(GOLD);lcd.setCursor(countX,y);lcd.print(amount);
+    }
+  }
+  center("Kaffees pro Person",226,1,CREAM);
+  currentScreen=Screen::Ranking; displayAt=millis();
+}
+void serviceDisplay() {
+  uint32_t now=millis();
+  if((currentScreen==Screen::Boot && uint32_t(now-displayAt)>=15000) ||
+     (currentScreen==Screen::Result && uint32_t(now-displayAt)>=4000) ||
+     (currentScreen==Screen::Ranking && uint32_t(now-displayAt)>=cafe::RANKING_DURATION_MS)) idleScreen();
+  if(currentScreen!=Screen::Idle) return;
+  if(rankingCycle.due(now)) { rankingScreen(rankingCycle.take(now)); return; }
+  if(networkLine()!=lastNetworkLine) { idleScreen(); return; }
+  if(uptimeMs()/1000!=lastSteamSecond) {
+    if(cupTime()!=lastCupTime) drawCupTime();
+    drawSteam();
+  }
+}
+
 void anchorClock() {
   int64_t now=epochNow(); if(!now || anchors.count(session) || !journalOK || storageError.length()) return;
   Anchor a; a.epoch=now; a.uptime=uptimeMs(); JsonDocument d;
@@ -506,13 +604,11 @@ void setup() {
   frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,1,CREAM);
   center("AP: "+cfg.apPassword,125,2,GOLD);center("Login: admin",150,2,CREAM);
   center(cfg.adminPassword,170,2,GOLD);center(WiFi.softAPIP().toString(),210,2,CREAM);
-  displayAt=millis();beep(1,2000,80);
+  displayAt=millis();rankingCycle.reset(displayAt);beep(1,2000,80);
 }
 void loop() {
   serviceBuzzer();serviceNetwork();anchorClock();
   pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
-  uint32_t now=millis();
-  if((currentScreen==Screen::Boot && uint32_t(now-displayAt)>15000) || (currentScreen==Screen::Result && uint32_t(now-displayAt)>4000))idleScreen();
-  if(currentScreen==Screen::Idle && networkLine()!=lastNetworkLine)idleScreen();
+  serviceDisplay();
   delay(1);
 }

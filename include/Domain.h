@@ -4,7 +4,7 @@
 #include <string>
 
 namespace cafe {
-constexpr const char* VERSION = "1.0.0";
+constexpr const char* VERSION = "1.0.2";
 constexpr const char* TZ_BERLIN = "CET-1CEST,M3.5.0,M10.5.0/3";
 constexpr int64_t MIN_EPOCH = 1704067200; // 2024-01-01 UTC
 constexpr int64_t MAX_EPOCH = 2145916800LL; // 2038-01-01 UTC (core 2 uses 32-bit time_t)
