@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
+#include <VL53L0X.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
@@ -17,9 +19,11 @@
 #include <vector>
 #include "Domain.h"
 #include "DisplayLogic.h"
+#include "Backlight.h"
 
 namespace pins {
 constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
+constexpr uint8_t LCD_BL=14, TOF_SDA=16, TOF_SCL=17;
 }
 constexpr uint16_t BG=0x1083, CREAM=0xFF18, GOLD=0xED68;
 constexpr uint16_t BUZZER_FREQUENCY=2500, BUZZER_MS=200;
@@ -51,6 +55,54 @@ Screen currentScreen=Screen::Boot;
 String lastNetworkLine, lastCupTime;
 uint64_t lastSteamSecond=UINT64_MAX;
 cafe::RankingCycle rankingCycle;
+cafe::BacklightTimer backlightTimer;
+cafe::PresenceGate presenceGate;
+VL53L0X tof;
+bool backlightOn=true, tofOK=false;
+uint16_t tofDistance=0;
+uint32_t lastTofPoll=0,lastTofResult=0;
+
+void serviceBacklight() {
+  bool on=backlightTimer.on(millis());
+  if(on!=backlightOn) {
+    backlightOn=on;
+    digitalWrite(pins::LCD_BL,on?HIGH:LOW);
+  }
+}
+void setupTof() {
+  Wire.begin(pins::TOF_SDA,pins::TOF_SCL,100000);
+  Wire.setTimeOut(10);
+  tof.setBus(&Wire);tof.setTimeout(200);
+  tofOK=tof.init();
+  if(tofOK) {
+    tofOK=tof.setMeasurementTimingBudget(33000);
+    if(tofOK) {tof.startContinuous(100);tofOK=tof.last_status==0;}
+  }
+  tof.setTimeout(20);
+  lastTofResult=millis();
+  Serial.println(tofOK ? "VL53L0X bereit (SDA16/SCL17, Naehe 80 cm)" :
+    "VL53L0X fehlt/antwortet nicht. Aufwecken per RFID bleibt aktiv.");
+}
+void serviceTof() {
+  uint32_t now=millis();
+  if(!tofOK || uint32_t(now-lastTofPoll)<100)return;
+  lastTofPoll=now;
+  uint8_t ready=tof.readReg(VL53L0X::RESULT_INTERRUPT_STATUS);
+  bool valid=false;uint16_t mm=0;
+  if(tof.last_status==0 && (ready&0x07)) {
+    // Read only a completed continuous measurement, never start/wait for a shot.
+    mm=tof.readRangeContinuousMillimeters();
+    valid=!tof.timeoutOccurred() && tof.last_status==0 && mm>=20 && mm<=2000;
+    lastTofResult=now;tofDistance=valid?mm:0;
+  } else {
+    if(uint32_t(now-lastTofResult)<1000)return;
+    tofDistance=0;
+  }
+  if(presenceGate.update(valid,mm)) {
+    backlightTimer.approach(now);
+    serviceBacklight();
+  }
+}
 
 uint64_t uptimeMs() { return static_cast<uint64_t>(esp_timer_get_time()/1000); }
 int64_t epochNow() { int64_t t=time(nullptr); return cafe::validTime(t) ? t : 0; }
@@ -316,7 +368,7 @@ void serviceDisplay() {
      (currentScreen==Screen::Result && uint32_t(now-displayAt)>=4000) ||
      (currentScreen==Screen::Ranking && uint32_t(now-displayAt)>=cafe::RANKING_DURATION_MS)) idleScreen();
   if(currentScreen!=Screen::Idle) return;
-  if(rankingCycle.due(now)) { rankingScreen(rankingCycle.take(now)); return; }
+  if(backlightOn && rankingCycle.due(now)) { rankingScreen(rankingCycle.take(now)); return; }
   if(networkLine()!=lastNetworkLine) { idleScreen(); return; }
   if(uptimeMs()/1000!=lastSteamSecond) {
     if(cupTime()!=lastCupTime) drawCupTime();
@@ -364,6 +416,8 @@ void pollRFID() {
       for(byte i=0;i<rfid.uid.size;i++) { if(i) uid+=':'; if(rfid.uid.uidByte[i]<16) uid+='0'; uid+=String(rfid.uid.uidByte[i],HEX); }
       uid.toUpperCase(); rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
       bool fresh=!latched; latched=true;
+      // Wake on every new chip contact, even unknown chips or cooldown hits.
+      if(fresh) {backlightTimer.chip(now);serviceBacklight();}
       if(fresh && (!acceptedOnce || uint32_t(now-lastAccepted)>=3000)) {
         acceptedOnce=true; lastAccepted=now; handleCard(uid);
       }
@@ -388,6 +442,8 @@ String cleanName(String s) { s.trim(); for(size_t i=0;i<s.length();i++) if((uint
 
 void apiStatus() {
   if(!auth()) return; JsonDocument d;
+  d["backlightOn"]=backlightOn;d["tofOK"]=tofOK;
+  d["distanceMm"]=tofDistance;d["presence"]=presenceGate.present();
   d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
   d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.ssid;
   d["epoch"]=epochNow(); d["readerOK"]=readerOK; d["storageError"]=storageError;
@@ -576,7 +632,10 @@ void serviceNetwork() {
   if(cfg.ssid.length() && WiFi.status()!=WL_CONNECTED && uint32_t(millis()-lastWifiRetry)>=30000) {lastWifiRetry=millis();WiFi.reconnect();}
 }
 void setup() {
-  Serial.begin(115200);pinMode(pins::BUZZER,OUTPUT);digitalWrite(pins::BUZZER,LOW);
+  Serial.begin(115200);
+  pinMode(pins::LCD_BL,OUTPUT);digitalWrite(pins::LCD_BL,HIGH);
+  backlightTimer.reset(millis());
+  pinMode(pins::BUZZER,OUTPUT);digitalWrite(pins::BUZZER,LOW);
   esp_timer_create_args_t timerArgs{};timerArgs.callback=cutoffTone;timerArgs.name="buzzer-cutoff";
   bool timerOK=esp_timer_create(&timerArgs,&buzzerCutoff)==ESP_OK;
   buzzerReady=timerOK && ledcSetup(BUZZER_CHANNEL,BUZZER_FREQUENCY,10)>0;
@@ -598,7 +657,7 @@ void setup() {
   WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.setHostname("cafe-r107");
   bool apOK=WiFi.softAP(apName().c_str(),cfg.apPassword.c_str());
   if(cfg.ssid.length()){WiFi.setAutoReconnect(true);WiFi.begin(cfg.ssid.c_str(),cfg.wifiPassword.c_str());}
-  setupWeb();
+  setupWeb();setupTof();
   Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
   if(storageError.length())Serial.println(storageError);
   frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,1,CREAM);
@@ -607,7 +666,7 @@ void setup() {
   displayAt=millis();rankingCycle.reset(displayAt);beep(1,2000,80);
 }
 void loop() {
-  serviceBuzzer();serviceNetwork();anchorClock();
+  serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();
   pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
   serviceDisplay();
   delay(1);

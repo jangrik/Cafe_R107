@@ -1,5 +1,6 @@
 #include "Domain.h"
 #include "DisplayLogic.h"
+#include "Backlight.h"
 #include <cassert>
 #include <cstdlib>
 #include <iostream>
@@ -58,5 +59,34 @@ int main(){
  assert(!cycle.due(58998));assert(cycle.due(58999));
  assert(cycle.take(58999)==P::Today);
  assert(cafe::RANKING_DURATION_MS==5000);
- std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings and display cadence passed.\n";
+ // Lighting: exact ten-minute cutoff and 30-second proximity grant.
+ cafe::BacklightTimer light;light.reset(1000);
+ assert(light.on(600999));assert(!light.on(601000));
+ light.approach(602000);assert(light.on(602000));
+ assert(light.on(631999));assert(!light.on(632000));
+ light.chip(640000);assert(light.on(1239999));assert(!light.on(1240000));
+ // Proximity cannot shorten the existing chip window.
+ light.chip(2000000);light.approach(2001000);
+ assert(light.on(2031000));assert(light.on(2599999));assert(!light.on(2600000));
+ light.reset(UINT32_MAX-1000);
+ assert(light.on(598998));assert(!light.on(598999));
+ light.approach(UINT32_MAX-1000);
+ assert(light.on(28998));assert(!light.on(28999));
+ // Expired windows do not reappear on the next millis() wrap.
+ assert(!light.on(UINT32_MAX-900));
+ cafe::PresenceGate gate;
+ assert(!gate.update(true,700));assert(!gate.update(true,700));
+ assert(gate.update(true,700));assert(gate.present());
+ for(int i=0;i<100;i++)assert(!gate.update(true,600)); // Holding still never retriggers.
+ for(int i=0;i<5;i++)assert(!gate.update(true,900)); // Hysteresis retains presence.
+ assert(gate.present());
+ for(int i=0;i<5;i++)assert(!gate.update(true,1200));
+ assert(!gate.present());
+ assert(!gate.update(true,500));assert(!gate.update(true,500));assert(gate.update(true,500));
+ for(int i=0;i<5;i++)assert(!gate.update(false,0));
+ assert(!gate.present());
+ // A sporadic near reading is not enough; an intervening far reading resets it.
+ assert(!gate.update(true,700));assert(!gate.update(true,1200));
+ assert(!gate.update(true,700));assert(!gate.update(true,700));assert(gate.update(true,700));
+ std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings, display cadence and backlight/presence passed.\n";
 }

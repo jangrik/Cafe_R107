@@ -1,8 +1,50 @@
-# Cafe R107 · Version 1.0.2
+# Cafe R107 · Version 1.0.3
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.3: Hintergrundbeleuchtung und Näherung
+
+**Vor dem Flashen:** LCD **BL von 3V trennen und an GPIO 14 anschließen**.
+Der BL-Anschluss des Waveshare-Moduls ist ein Steuereingang; keine zusätzliche
+Transistorstufe erforderlich. VCC des LCD bleibt an 3V. Niemals GPIO 14 parallel
+zur bisherigen festen 3V-Verbindung anschließen.
+
+| VL53L0X-Modul | ESP32 |
+|---|---|
+| VIN/VCC (3,3-V-kompatibles Breakout-Modul) | 3V |
+| GND | G |
+| SDA | 16 |
+| SCL | 17 |
+| XSHUT / GPIO1 | unbeschaltet |
+
+Nur ein VL53L0X wird verwendet; I²C-Adresse 0x29. Die Pinwahl lässt SPI und
+RFID unverändert. Das Modul muss für 3,3 V Versorgung/Logik geeignet sein;
+der nackte Sensorchip ist kein Ersatz für ein Breakout mit passender Versorgung.
+Den Sensor nach vorn ausrichten, ohne Abdeckung direkt über der Optik.
+
+- Nach dem Start und jedem neuen Chipkontakt bleibt das Licht **10 Minuten**
+  an. Das gilt auch für unbekannte Chips und Kontakte innerhalb der Buchungssperre.
+- Eine erkannte Annäherung bis **80 cm** weckt es für **30 Sekunden**.
+  Sie zählt nicht als Chipkontakt und erzeugt keine Buchung. Restzeit nach
+  einem Chipkontakt wird durch die kurze Näherungsfrist nicht verkürzt.
+- Drei aufeinanderfolgende Nahmessungen lösen aus (ca. 0,3 s). Erst nach fünf
+  Fern-/ungültigen Messungen, bei gültiger Ferne ab **110 cm**, wird neu scharf
+  geschaltet. Dauerhafte Anwesenheit lässt das Licht nicht endlos an.
+- Beim nächsten Chipkontakt leuchtet es sofort wieder zehn Minuten.
+- Ohne angeschlossenen oder beim Start erkannten TOF-Sensor bleibt RFID als
+  Aufweckquelle aktiv. Sensorfehler/fehlende Messungen erzeugen keine Buchungen.
+- ESP32, RFID, WLAN und Webserver bleiben bei ausgeschaltetem Licht aktiv.
+  Es wird nur BL abgeschaltet; unsichtbare Ranglisten werden nicht berechnet.
+- Grenzwerte stehen in `include/Backlight.h`. Status/Entfernung sind zusätzlich
+  über `/api/status` sichtbar (0 mm bedeutet keine gültige Entfernung).
+- Die Pololu-VL53L0X-Bibliothek 1.3.1 wird von PlatformIO installiert.
+
+**Update:** `git pull` und `pio run -t upload`. Kein LittleFS-Upload erforderlich.
+Erste Prüfung: BL-Umverdrahtung, Annäherung, Buchung, zehn Minuten warten,
+Wiederaufwecken durch Entfernen/erneutes Annähern und durch einen Chip.
+Der Hardwaretest mit dem konkreten Sensormodul steht noch aus.
 
 ## Neu in 1.0.2
 
@@ -61,10 +103,11 @@ GPIO-Nummern; keine Annahme über einen herausgeführten GPIO 21 oder 5.
 | RC522 | 3.3V / GND | 3V / G |
 | RC522 | SDA (SPI-CS) / RST | 25 / 22 |
 | RC522 | SCK / MOSI / MISO | 18 / 23 / 19 |
-| ST7789 LCD | VCC / GND / BL | 3V / G / 3V |
+| ST7789 LCD | VCC / GND / BL | 3V / G / GPIO 14 |
 | ST7789 LCD | CLK / DIN | 18 / 23, gemeinsam mit RFID |
 | ST7789 LCD | CS / DC / RST | 26 / 27 / 33 |
 | Summer-Treiber | Basisansteuerung | GPIO 32 über 270 Ω |
+| VL53L0X | VIN / GND / SDA / SCL | 3V / G / 16 / 17 |
 
 Summer: **PN2222A**, Emitter an GND, Kollektor an Summer −. Summer + über
 **10 Ω, mindestens ¼ W**, an 3V. Basis zusätzlich über 10 kΩ an GND.
