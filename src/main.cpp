@@ -1,3 +1,5 @@
+#define VERSION "1.0.1"
+
 #include <Arduino.h>
 #include <SPI.h>
 #include <WiFi.h>
@@ -104,14 +106,16 @@ void idleScreen() {
   lcd.drawFastHLine(78,131,84,GOLD);
   for(int x=101;x<=129;x+=14) { lcd.drawLine(x,76,x-3,68,CREAM); lcd.drawLine(x-3,68,x,60,CREAM); }
   center("Zeit fuer Kaffee?",150,2,CREAM);
-  center(storageError.length() ? "Speicher pruefen!" : (readerOK ? "Bitte Chip vorhalten" : "RFID nicht bereit"),177,1,storageError.length()?ST77XX_RED:GOLD);
+  center(storageError.length() ? "Speicher pruefen!" : (readerOK ? "Bitte Chip vorhalten" : "RFID nicht bereit"),177,2,storageError.length()?ST77XX_RED:GOLD);
   center(epochNow() ? "" : "Uhrzeit bitte im Browser setzen",195,1,GOLD);
   lastNetworkLine=networkLine(); center(lastNetworkLine,218,1,CREAM);
   currentScreen=Screen::Idle;
 }
-void message(const String& title,const String& name,const String& detail,bool success) {
+void message(const String& title,const String& name,const String& detail1, const String& detail2, bool success) {
   frame(); uint16_t c=success?0x77AE:GOLD;
-  center(title,75,2,c); center(lcdText(name),112,2,CREAM); center(detail,160,1,GOLD);
+  center(title,75,2,c); center(lcdText(name),112,2,CREAM); 
+  center(detail1,145,2,GOLD);
+  center(detail2,175,2,GOLD);
   center("Cafe R107",211,1,CREAM); currentScreen=Screen::Result; displayAt=millis();
 }
 
@@ -232,22 +236,22 @@ void anchorClock() {
 
 void handleCard(const String& uid) {
   if(!mounted || !journalOK || storageError.length()) {
-    message("Nicht gebucht","Speicherfehler","Bitte Weboberflaeche pruefen",false); beep(3,1000,70); return;
+    message("Nicht gebucht","Speicherfehler","Bitte Weboberflaeche","pruefen!!!",false); beep(3,1000,70); return;
   }
   String person=personFor(uid);
   if(!person.length()) {
     bool exists=false; for(const auto& p:pending) if(p.uid==uid) exists=true;
     if(!exists) {
-      if(pending.size()>=MAX_PENDING) { message("Nicht gebucht","Chip-Liste voll","Bitte im Browser aufraeumen",false); return; }
+      if(pending.size()>=MAX_PENDING) { message("Nicht gebucht","Chip-Liste voll","Bitte im Browser","aufraeumen!!!",false); return; }
       pending.push_back({uid});
-      if(!saveRegistry()) { pending.pop_back(); message("Nicht gespeichert","Speicherfehler","Bitte Browser pruefen",false); beep(3,1000,70); return; }
+      if(!saveRegistry()) { pending.pop_back(); message("Nicht gespeichert","Speicherfehler","Bitte Browser","pruefen!!!",false); beep(3,1000,70); return; }
     }
-    message("Neuer Chip",uid,"Bitte im Browser zuordnen",false); beep(2,1500,90); return;
+    message("Neuer Chip",uid,"Bitte im Browser","zuordnen!!!",false); beep(2,1500,90); return;
   }
   JsonDocument d; d["kind"]="coffee"; d["person"]=person;
   d["epoch"]=epochNow(); d["session"]=session; d["uptime"]=uptimeMs();
-  if(!appendRecord(d)) { message("Nicht gebucht","Speicherfehler","Bitte im Browser pruefen",false); beep(3,1000,70); return; }
-  message("+1 Kaffee",personName(person),epochNow()?"Gespeichert. Guten Genuss!":"Gespeichert - Zeit noch offen",true);
+  if(!appendRecord(d)) { message("Nicht gebucht","Speicherfehler","Bitte im Browser","pruefen!!!",false); beep(3,1000,70); return; }
+  message("+1 Kaffee",personName(person),"Gespeichert.",epochNow()?"Guten Genuss!":"Zeit noch offen",true);
   beep(1,BUZZER_FREQUENCY,BUZZER_MS);
 }
 void pollRFID() {
@@ -500,8 +504,8 @@ void setup() {
   Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
   if(storageError.length())Serial.println(storageError);
   frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,1,CREAM);
-  center("AP: "+cfg.apPassword,125,1,GOLD);center("Login: admin",150,1,CREAM);
-  center(cfg.adminPassword,170,1,GOLD);center(WiFi.softAPIP().toString(),210,1,CREAM);
+  center("AP: "+cfg.apPassword,125,2,GOLD);center("Login: admin",150,2,CREAM);
+  center(cfg.adminPassword,170,2,GOLD);center(WiFi.softAPIP().toString(),210,2,CREAM);
   displayAt=millis();beep(1,2000,80);
 }
 void loop() {
