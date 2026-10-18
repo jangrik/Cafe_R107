@@ -1,8 +1,19 @@
-# Cafe R107 · Version 1.0.5
+# Cafe R107 · Version 1.0.6
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.6: Display-Off mit weiter aktiver Aufweckfunktion
+
+`POST /api/display/off` beendet sofort beide Beleuchtungsfristen und wechselt
+in `auto`, genau wie nach Ablauf der regulären Inaktivitätszeit. Ein neuer
+RFID-Kontakt schaltet das Licht wieder für zehn Minuten ein; eine erneute
+TOF-Näherung weckt es für 30 Sekunden mit der bisherigen Filterung/Hysterese.
+Auch JSON `{"mode":"off"}` an `/api/display` hat dieses Verhalten.
+Die Antwort lautet `{"ok":true,"on":false,"mode":"auto"}`.
+`on` bleibt dauerhaftes Einschalten, `auto` hebt diesen erzwungenen Zustand auf.
+Nur Firmware aktualisieren, kein LittleFS-Upload erforderlich.
 
 ## Neu in 1.0.5: Geräte-API
 
@@ -16,18 +27,17 @@ Neustart und keine Displayumschaltung aus. Zugriff über AP- und Client-Adresse.
 | POST | `/api/restart` | Neustart anfordern; HTTP 202, danach etwa 500 ms Verzögerung |
 | GET | `/api/display` | Aktuellen Lichtzustand und Modus lesen |
 | POST | `/api/display/on` | Beleuchtung dauerhaft einschalten |
-| POST | `/api/display/off` | Beleuchtung dauerhaft ausschalten |
+| POST | `/api/display/off` | Sofort aus wie bei abgelaufener Zeit; RFID/TOF bleiben aktiv |
 | POST | `/api/display/auto` | Bisherige Zeit-/TOF-Automatik wieder aktivieren |
 | POST | `/api/display` | Alternativ JSON `{"mode":"on"}`, `off` oder `auto` |
 | GET | `/api/tof` | Letzte TOF-Messung mit Einheit, Gültigkeit und Alter |
 
-**Display** meint die Hintergrundbeleuchtung an GPIO 21. Die Modi `on` und
-`off` übersteuern die Automatik bis zum nächsten Moduswechsel oder Neustart.
-Auch Chipkontakte und Näherung heben ein manuelles `off` nicht auf; Buchung,
-Summer und Webserver arbeiten weiter. Im Hintergrund laufen die normalen
-Aktivitätsfristen weiter. `auto` setzt diese Fristen nicht neu: Nach langer
-Inaktivität bleibt das Licht daher aus, bis wieder Aktivität erkannt wird.
-Der manuelle Modus wird nicht in LittleFS gespeichert; nach Reset gilt `auto`.
+**Display** meint die Hintergrundbeleuchtung an GPIO 21. `on` übersteuert
+die Automatik bis zum nächsten Moduswechsel oder Neustart. `off` löscht beide
+laufenden Aktivitätsfristen und aktiviert `auto`: RFID und TOF können das Licht
+anschließend wieder einschalten. Chipkontakte, Buchung, Summer und Webserver
+arbeiten unverändert weiter. `auto` alleine setzt keine Fristen neu.
+Der Modus wird nicht in LittleFS gespeichert; nach Reset gilt `auto`.
 
 Beispiele für Windows/PowerShell (auf Linux/macOS `curl` statt `curl.exe`):
 Das Kennwort wird interaktiv abgefragt, nicht in die Kommandozeile geschrieben.
@@ -42,7 +52,7 @@ curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.4.1/api/display/
 curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.4.1/api/restart
 ```
 
-Beispielantwort Display: `{"on":false,"mode":"off"}`.
+Beispielantwort Display nach Ausschalten: `{"on":false,"mode":"auto"}`.
 Eine erfolgreiche POST-Umschaltung liefert zusätzlich `"ok":true`.
 Ungültige Modi liefern HTTP 400 und ändern den bisherigen Modus nicht.
 

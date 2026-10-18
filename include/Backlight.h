@@ -10,7 +10,7 @@ constexpr uint16_t PRESENCE_NEAR_MM=800, PRESENCE_FAR_MM=1100;
 // Proximity grants a short look at the display; only chip contacts reset the
 // ten-minute booking window. Continuous presence cannot keep it on forever.
 class BacklightTimer {
-  enum class Mode { Auto, On, Off };
+  enum class Mode { Auto, On };
   Mode mode_=Mode::Auto;
   uint32_t chipAt_=0, proximityAt_=0;
   bool chipWindow_=true, proximityWindow_=false;
@@ -20,11 +20,14 @@ public:
     if(!mode)return false;
     if(std::strcmp(mode,"auto")==0)mode_=Mode::Auto;
     else if(std::strcmp(mode,"on")==0)mode_=Mode::On;
-    else if(std::strcmp(mode,"off")==0)mode_=Mode::Off;
+    else if(std::strcmp(mode,"off")==0) {
+      // Behave exactly like expired inactivity timers; wake sources stay armed.
+      chipWindow_=false;proximityWindow_=false;mode_=Mode::Auto;
+    }
     else return false;
     return true;
   }
-  const char* modeName() const {return mode_==Mode::On?"on":mode_==Mode::Off?"off":"auto";}
+  const char* modeName() const {return mode_==Mode::On?"on":"auto";}
   void chip(uint32_t now) { chipAt_=now;chipWindow_=true; }
   void approach(uint32_t now) { proximityAt_=now;proximityWindow_=true; }
   bool on(uint32_t now) {

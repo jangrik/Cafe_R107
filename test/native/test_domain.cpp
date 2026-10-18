@@ -88,15 +88,23 @@ int main(){
  // A sporadic near reading is not enough; an intervening far reading resets it.
  assert(!gate.update(true,700));assert(!gate.update(true,1200));
  assert(!gate.update(true,700));assert(!gate.update(true,700));assert(gate.update(true,700));
- // Manual API modes override timers and both wake sources, until auto/reset.
- light.reset(0);assert(light.setMode("off"));assert(!light.on(1));
- light.chip(10);light.approach(20);assert(!light.on(30));
- assert(std::strcmp(light.modeName(),"off")==0);
- assert(!light.setMode("invalid"));assert(!light.setMode(nullptr));assert(!light.on(31));
- assert(light.setMode("on"));assert(light.on(700000));
- assert(light.setMode("auto"));assert(!light.on(700001));
- light.chip(700002);assert(light.on(700003));
- light.setMode("off");light.reset(800000);assert(light.on(800000));
+ // API off expires both timers and returns to auto, rather than blocking wakeups.
+ light.reset(0);light.approach(1);
+ assert(light.setMode("off"));assert(!light.on(2));
+ assert(std::strcmp(light.modeName(),"auto")==0);
+ assert(!light.setMode("invalid"));assert(!light.setMode(nullptr));assert(!light.on(3));
+ assert(light.setMode("auto"));assert(!light.on(4)); // No old timer resurrected.
+ light.chip(10);assert(light.on(10));assert(light.on(600009));assert(!light.on(600010));
+ light.setMode("off");light.approach(700000);assert(light.on(700000));
+ assert(light.on(729999));assert(!light.on(730000));
+ // Off also exits forced-on, and a following RFID contact wakes normally.
+ light.setMode("on");assert(light.on(900000));
+ light.setMode("off");assert(!light.on(900000));
+ light.chip(900001);assert(light.on(900001));
+ // Forced-on and reset semantics remain unchanged.
+ light.setMode("on");assert(light.on(1600000));
+ light.setMode("auto");assert(!light.on(1600000));
+ light.reset(1700000);assert(light.on(1700000));
  assert(std::strcmp(light.modeName(),"auto")==0);
  assert(cafe::freshTofSample(true,true,true,500));
  assert(!cafe::freshTofSample(true,true,true,501));
