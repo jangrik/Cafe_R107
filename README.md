@@ -1,8 +1,77 @@
-# Cafe R107 · Version 1.0.4
+# Cafe R107 · Version 1.0.5
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.5: Geräte-API
+
+Alle Endpunkte verwenden den vorhandenen HTTP-Basic-Login **admin** mit dem
+Admin-Kennwort. Schreibende Befehle erfordern **POST** und den Header
+`X-Cafe-Request: 1`. Ein Aufruf über die Browser-Adresszeile (GET) löst keinen
+Neustart und keine Displayumschaltung aus. Zugriff über AP- und Client-Adresse.
+
+| Methode | Pfad | Funktion |
+|---|---|---|
+| POST | `/api/restart` | Neustart anfordern; HTTP 202, danach etwa 500 ms Verzögerung |
+| GET | `/api/display` | Aktuellen Lichtzustand und Modus lesen |
+| POST | `/api/display/on` | Beleuchtung dauerhaft einschalten |
+| POST | `/api/display/off` | Beleuchtung dauerhaft ausschalten |
+| POST | `/api/display/auto` | Bisherige Zeit-/TOF-Automatik wieder aktivieren |
+| POST | `/api/display` | Alternativ JSON `{"mode":"on"}`, `off` oder `auto` |
+| GET | `/api/tof` | Letzte TOF-Messung mit Einheit, Gültigkeit und Alter |
+
+**Display** meint die Hintergrundbeleuchtung an GPIO 21. Die Modi `on` und
+`off` übersteuern die Automatik bis zum nächsten Moduswechsel oder Neustart.
+Auch Chipkontakte und Näherung heben ein manuelles `off` nicht auf; Buchung,
+Summer und Webserver arbeiten weiter. Im Hintergrund laufen die normalen
+Aktivitätsfristen weiter. `auto` setzt diese Fristen nicht neu: Nach langer
+Inaktivität bleibt das Licht daher aus, bis wieder Aktivität erkannt wird.
+Der manuelle Modus wird nicht in LittleFS gespeichert; nach Reset gilt `auto`.
+
+Beispiele für Windows/PowerShell (auf Linux/macOS `curl` statt `curl.exe`):
+Das Kennwort wird interaktiv abgefragt, nicht in die Kommandozeile geschrieben.
+Die Adresse gegebenenfalls durch die Client-IP ersetzen.
+
+```sh
+curl.exe -u admin http://192.168.4.1/api/tof
+curl.exe -u admin http://192.168.4.1/api/display
+curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.4.1/api/display/off
+curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.4.1/api/display/on
+curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.4.1/api/display/auto
+curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.4.1/api/restart
+```
+
+Beispielantwort Display: `{"on":false,"mode":"off"}`.
+Eine erfolgreiche POST-Umschaltung liefert zusätzlich `"ok":true`.
+Ungültige Modi liefern HTTP 400 und ändern den bisherigen Modus nicht.
+
+Beispielantwort TOF:
+
+```json
+{"available":true,"valid":true,"distanceMm":432,"ageMs":34,"presence":true}
+```
+
+- `available`: Sensor wurde beim Start erfolgreich initialisiert.
+- `valid`: letzte Messung gültig und höchstens 500 ms alt.
+- `distanceMm`: Entfernung in **Millimetern**, bei ungültiger/veralteter Messung
+  oder fehlendem Sensor **null** (kein erfundener Null-Abstand).
+- `ageMs`: Alter der letzten abgeschlossenen Messung in Millisekunden,
+  **null**, wenn noch keine Messung vorliegt. Das gilt auch für ungültige Messungen.
+- `presence`: gefilterter Anwesenheitszustand mit der bisherigen Hysterese.
+
+Die Abfrage verwendet die laufenden, etwa alle 100 ms aktualisierten Messungen
+und wartet nicht auf eine neue Messung. Ein fehlender Sensor liefert weiterhin
+HTTP 200 mit `available:false`, `valid:false` und `distanceMm:null`.
+Neustartantwort: `{"ok":true,"restarting":true,"delayMs":500}` (HTTP 202).
+Die Antwort wird zuerst gesendet; der Neustart erfolgt anschließend in der
+Hauptschleife nach abgeschlossenen synchronen Dateizugriffen. Weitere
+Neustartanforderungen schieben einen bereits geplanten Neustart nicht hinaus.
+
+**Update:** Nur `git pull` und `pio run -t upload`; kein LittleFS-Upload nötig.
+Build/Tests prüfen zusätzlich manuelle Modi, ungültige Modi, Messwert-Frische
+und die verzögerte Neustartlogik einschließlich `millis()`-Überlauf. API und
+Neustart müssen nach dem Flashen noch am echten Gerät geprüft werden.
 
 ## Neu in 1.0.4
 

@@ -59,6 +59,8 @@ cafe::BacklightTimer backlightTimer;
 cafe::PresenceGate presenceGate;
 VL53L0X tof;
 bool backlightOn=true, tofOK=false;
+bool tofHasSample=false,tofSampleValid=false;
+cafe::RestartRequest restartRequest;
 uint16_t tofDistance=0;
 uint32_t lastTofPoll=0,lastTofResult=0;
 
@@ -94,9 +96,10 @@ void serviceTof() {
     mm=tof.readRangeContinuousMillimeters();
     valid=!tof.timeoutOccurred() && tof.last_status==0 && mm>=20 && mm<=2000;
     lastTofResult=now;tofDistance=valid?mm:0;
+    tofHasSample=true;tofSampleValid=valid;
   } else {
     if(uint32_t(now-lastTofResult)<1000)return;
-    tofDistance=0;
+    tofDistance=0;tofSampleValid=false;
   }
   if(presenceGate.update(valid,mm)) {
     backlightTimer.approach(now);
@@ -440,9 +443,43 @@ bool body(JsonDocument& d) {
 bool writable() { if(storageError.length() || !mounted || !journalOK) {error(503,"Speicher nicht bereit: "+storageError);return false;}return true; }
 String cleanName(String s) { s.trim(); for(size_t i=0;i<s.length();i++) if((uint8_t)s[i]<32) return ""; return s.length()<=48?s:String(""); }
 
+void displayState(JsonDocument& d) {
+  serviceBacklight();
+  d["on"]=backlightOn;d["mode"]=backlightTimer.modeName();
+}
+void apiDisplayGet() {
+  if(!auth())return;
+  JsonDocument d;displayState(d);sendJson(d);
+}
+void setDisplayMode(const char* mode) {
+  if(!backlightTimer.setMode(mode)) {error(400,"mode muss on, off oder auto sein");return;}
+  JsonDocument out;out["ok"]=true;displayState(out);sendJson(out);
+}
+void apiDisplayPost() {
+  if(!auth(true))return;
+  JsonDocument d;if(!body(d))return;
+  setDisplayMode(d["mode"]|"");
+}
+void apiTof() {
+  if(!auth())return;
+  uint32_t age=uint32_t(millis()-lastTofResult);
+  bool valid=cafe::freshTofSample(tofOK,tofHasSample,tofSampleValid,age);
+  JsonDocument d;d["available"]=tofOK;d["valid"]=valid;
+  if(valid)d["distanceMm"]=tofDistance;else d["distanceMm"]=nullptr;
+  if(tofHasSample)d["ageMs"]=age;else d["ageMs"]=nullptr;
+  d["presence"]=presenceGate.present();sendJson(d);
+}
+void apiRestart() {
+  if(!auth(true))return;
+  uint32_t now=millis();restartRequest.schedule(now);
+  JsonDocument d;d["ok"]=true;d["restarting"]=true;
+  d["delayMs"]=restartRequest.remaining(now);
+  web.sendHeader("Connection","close");sendJson(d,202);
+}
+
 void apiStatus() {
   if(!auth()) return; JsonDocument d;
-  d["backlightOn"]=backlightOn;d["tofOK"]=tofOK;
+  d["backlightOn"]=backlightOn;d["backlightMode"]=backlightTimer.modeName();d["tofOK"]=tofOK;
   d["distanceMm"]=tofDistance;d["presence"]=presenceGate.present();
   d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
   d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.ssid;
@@ -601,6 +638,13 @@ uint32_t fmFlags(fs::FS&,String,uint32_t flags) {
 }
 void setupWeb() {
   const char* headers[]={"X-Cafe-Request"};web.collectHeaders(headers,1);
+  web.on("/api/restart",HTTP_POST,apiRestart);
+  web.on("/api/display",HTTP_GET,apiDisplayGet);
+  web.on("/api/display",HTTP_POST,apiDisplayPost);
+  web.on("/api/display/on",HTTP_POST,[](){if(auth(true))setDisplayMode("on");});
+  web.on("/api/display/off",HTTP_POST,[](){if(auth(true))setDisplayMode("off");});
+  web.on("/api/display/auto",HTTP_POST,[](){if(auth(true))setDisplayMode("auto");});
+  web.on("/api/tof",HTTP_GET,apiTof);
   web.on("/api/status",HTTP_GET,apiStatus);web.on("/api/registry",HTTP_GET,apiRegistry);
   web.on("/api/report",HTTP_GET,apiReport);web.on("/api/history",HTTP_GET,apiHistory);
   web.on("/api/person",HTTP_POST,apiPerson);web.on("/api/assign",HTTP_POST,apiAssign);
@@ -669,5 +713,7 @@ void loop() {
   serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();
   pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
   serviceDisplay();
+  // File operations and the HTTP response have completed before restarting.
+  if(restartRequest.due(millis())) {toneHz(0);ESP.restart();}
   delay(1);
 }

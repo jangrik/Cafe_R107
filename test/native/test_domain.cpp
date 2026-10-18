@@ -88,5 +88,25 @@ int main(){
  // A sporadic near reading is not enough; an intervening far reading resets it.
  assert(!gate.update(true,700));assert(!gate.update(true,1200));
  assert(!gate.update(true,700));assert(!gate.update(true,700));assert(gate.update(true,700));
+ // Manual API modes override timers and both wake sources, until auto/reset.
+ light.reset(0);assert(light.setMode("off"));assert(!light.on(1));
+ light.chip(10);light.approach(20);assert(!light.on(30));
+ assert(std::strcmp(light.modeName(),"off")==0);
+ assert(!light.setMode("invalid"));assert(!light.setMode(nullptr));assert(!light.on(31));
+ assert(light.setMode("on"));assert(light.on(700000));
+ assert(light.setMode("auto"));assert(!light.on(700001));
+ light.chip(700002);assert(light.on(700003));
+ light.setMode("off");light.reset(800000);assert(light.on(800000));
+ assert(std::strcmp(light.modeName(),"auto")==0);
+ assert(cafe::freshTofSample(true,true,true,500));
+ assert(!cafe::freshTofSample(true,true,true,501));
+ assert(!cafe::freshTofSample(false,true,true,0));
+ assert(!cafe::freshTofSample(true,false,true,0));
+ assert(!cafe::freshTofSample(true,true,false,0));
+ cafe::RestartRequest restart;assert(!restart.due(1000));assert(restart.remaining(1000)==0);
+ restart.schedule(UINT32_MAX-200);assert(restart.remaining(UINT32_MAX-200)==500);
+ restart.schedule(UINT32_MAX-100); // Repeated requests do not postpone the reboot.
+ assert(!restart.due(298));assert(restart.remaining(298)==1);
+ assert(restart.due(299));assert(restart.remaining(299)==0);
  std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings, display cadence and backlight/presence passed.\n";
 }
