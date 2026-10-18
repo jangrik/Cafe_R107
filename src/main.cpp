@@ -1,0 +1,511 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
+#include <MFRC522.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <ESPFMfGK.h>
+#include <esp_timer.h>
+#include <sys/time.h>
+#include <algorithm>
+#include <functional>
+#include <map>
+#include <set>
+#include <vector>
+#include "Domain.h"
+
+namespace pins {
+constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
+}
+constexpr uint16_t BG=0x1083, CREAM=0xFF18, GOLD=0xED68;
+constexpr uint16_t BUZZER_FREQUENCY=2500, BUZZER_MS=200;
+constexpr uint8_t BUZZER_CHANNEL=0;
+constexpr uint16_t FM_PORT=8080;
+constexpr size_t MAX_PEOPLE=50, MAX_CARDS=100, MAX_PENDING=30;
+WebServer web(80);
+ESPFMfGK filemgr(FM_PORT);
+MFRC522 rfid(pins::RFID_CS,pins::RFID_RST);
+Adafruit_ST7789 lcd(&SPI,pins::LCD_CS,pins::LCD_DC,pins::LCD_RST);
+
+struct Person { String id, name; };
+struct Card { String uid, person; };
+struct Pending { String uid; };
+struct Anchor { int64_t epoch=0; uint64_t uptime=0; };
+struct Config { String ssid, wifiPassword, apPassword, adminPassword; } cfg;
+std::vector<Person> people;
+std::vector<Card> cards;
+std::vector<Pending> pending;
+std::map<String,Anchor> anchors;
+std::set<uint32_t> cancellations;
+String session, storageError;
+bool mounted=false, journalOK=true, readerOK=false, fmReady=false, ntpStarted=false;
+uint32_t lastId=0;
+uint32_t lastPoll=0, lastPresence=0, lastAccepted=0, displayAt=0, lastWifiRetry=0;
+bool latched=false, acceptedOnce=false;
+enum class Screen { Boot, Idle, Result };
+Screen currentScreen=Screen::Boot;
+String lastNetworkLine;
+
+uint64_t uptimeMs() { return static_cast<uint64_t>(esp_timer_get_time()/1000); }
+int64_t epochNow() { int64_t t=time(nullptr); return cafe::validTime(t) ? t : 0; }
+String randomHex() { char b[17]; snprintf(b,sizeof(b),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random()); return b; }
+String apName() { return "Cafe-R107-"+WiFi.macAddress().substring(12,14)+WiFi.macAddress().substring(15,17); }
+String personName(const String& id) { for(const auto& p:people) if(p.id==id) return p.name; return "Unbekannte Person"; }
+String personFor(const String& uid) { for(const auto& c:cards) if(c.uid==uid) return c.person; return ""; }
+bool personExists(const String& id) { for(const auto& p:people) if(p.id==id) return true; return false; }
+
+// Core 2.0.17 is pinned in platformio.ini. Hardware PWM runs while the loop handles HTTP.
+bool buzzerReady=false, buzzerOn=false;
+esp_timer_handle_t buzzerCutoff=nullptr;
+void cutoffTone(void*) { ledcWrite(BUZZER_CHANNEL,0); }
+void armCutoff(uint16_t ms) {
+  if(buzzerCutoff) {esp_timer_stop(buzzerCutoff);esp_timer_start_once(buzzerCutoff,uint64_t(ms)*1000);}
+}
+uint8_t beeps=0; uint16_t beepFrequency=0, beepDuration=0; uint32_t beepAt=0;
+void toneHz(uint16_t hz) { if(buzzerReady) ledcWriteTone(BUZZER_CHANNEL,hz); }
+void beep(uint8_t count,uint16_t frequency,uint16_t duration) {
+  if(!buzzerReady) return;
+  beeps=count; beepFrequency=frequency; beepDuration=duration; buzzerOn=true;
+  toneHz(frequency); armCutoff(duration); beepAt=millis();
+}
+void serviceBuzzer() {
+  if(!beeps) return;
+  uint32_t now=millis();
+  if(buzzerOn && uint32_t(now-beepAt)>=beepDuration) {
+    toneHz(0); buzzerOn=false; --beeps; beepAt=now;
+  } else if(!buzzerOn && uint32_t(now-beepAt)>=100) {
+    toneHz(beepFrequency); armCutoff(beepDuration); buzzerOn=true; beepAt=now;
+  }
+}
+
+void center(const String& s,int y,uint8_t size,uint16_t color) {
+  lcd.setTextSize(size); lcd.setTextColor(color);
+  int16_t x,y0; uint16_t w,h; lcd.getTextBounds(s,0,0,&x,&y0,&w,&h);
+  lcd.setCursor((240-int(w))/2-x,y); lcd.print(s);
+}
+// Built-in GFX font is ASCII: transliterate common German letters only for LCD.
+String lcdText(String s) {
+  s.replace("ä","ae"); s.replace("ö","oe"); s.replace("ü","ue");
+  s.replace("Ä","Ae"); s.replace("Ö","Oe"); s.replace("Ü","Ue"); s.replace("ß","ss");
+  if(s.length()>18) s=s.substring(0,17)+".";
+  return s;
+}
+void frame() {
+  digitalWrite(pins::RFID_CS,HIGH);
+  lcd.fillScreen(BG); lcd.fillRect(0,0,240,49,0x3104);
+  center("Cafe R107",14,3,CREAM); lcd.drawFastHLine(18,49,204,GOLD);
+}
+String networkLine() { return WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString(); }
+void idleScreen() {
+  frame(); lcd.drawRoundRect(87,85,59,39,5,CREAM); lcd.drawRoundRect(146,91,15,22,5,CREAM);
+  lcd.drawFastHLine(78,131,84,GOLD);
+  for(int x=101;x<=129;x+=14) { lcd.drawLine(x,76,x-3,68,CREAM); lcd.drawLine(x-3,68,x,60,CREAM); }
+  center("Zeit fuer Kaffee?",150,2,CREAM);
+  center(storageError.length() ? "Speicher pruefen!" : (readerOK ? "Bitte Chip vorhalten" : "RFID nicht bereit"),177,1,storageError.length()?ST77XX_RED:GOLD);
+  center(epochNow() ? "" : "Uhrzeit bitte im Browser setzen",195,1,GOLD);
+  lastNetworkLine=networkLine(); center(lastNetworkLine,218,1,CREAM);
+  currentScreen=Screen::Idle;
+}
+void message(const String& title,const String& name,const String& detail,bool success) {
+  frame(); uint16_t c=success?0x77AE:GOLD;
+  center(title,75,2,c); center(lcdText(name),112,2,CREAM); center(detail,160,1,GOLD);
+  center("Cafe R107",211,1,CREAM); currentScreen=Screen::Result; displayAt=millis();
+}
+
+// Atomic replacement within LittleFS: never format on mount or parsing errors.
+bool saveJson(const char* path,JsonDocument& doc) {
+  String tmp=String(path)+".tmp";
+  File f=LittleFS.open(tmp,"w");
+  if(!f) return false;
+  size_t expected=measureJson(doc), written=serializeJson(doc,f);
+  f.flush(); f.close();
+  if(written!=expected) { LittleFS.remove(tmp); return false; }
+  if(!LittleFS.rename(tmp,path)) { LittleFS.remove(tmp); return false; }
+  return true;
+}
+bool saveConfig() {
+  JsonDocument d; d["schema"]=1; d["ssid"]=cfg.ssid; d["wifiPassword"]=cfg.wifiPassword;
+  d["apPassword"]=cfg.apPassword; d["adminPassword"]=cfg.adminPassword;
+  return saveJson("/config.json",d);
+}
+bool saveRegistry() {
+  JsonDocument d; d["schema"]=1;
+  JsonArray ps=d["people"].to<JsonArray>();
+  for(const auto& p:people) { JsonObject o=ps.add<JsonObject>(); o["id"]=p.id; o["name"]=p.name; }
+  JsonArray cs=d["cards"].to<JsonArray>();
+  for(const auto& c:cards) { JsonObject o=cs.add<JsonObject>(); o["uid"]=c.uid; o["person"]=c.person; }
+  JsonArray us=d["pending"].to<JsonArray>();
+  for(const auto& u:pending) us.add(u.uid);
+  return saveJson("/registry.json",d);
+}
+bool loadConfig() {
+  if(!LittleFS.exists("/config.json")) return saveConfig();
+  File f=LittleFS.open("/config.json","r"); JsonDocument d;
+  if(!f || deserializeJson(d,f) || d["schema"]!=1) return false;
+  cfg.ssid=d["ssid"].as<String>(); cfg.wifiPassword=d["wifiPassword"].as<String>();
+  cfg.apPassword=d["apPassword"].as<String>(); cfg.adminPassword=d["adminPassword"].as<String>();
+  return cfg.apPassword.length()>=8 && cfg.apPassword.length()<=63 && cfg.adminPassword.length()>=8;
+}
+bool loadRegistry() {
+  if(!LittleFS.exists("/registry.json")) return saveRegistry();
+  File f=LittleFS.open("/registry.json","r"); JsonDocument d;
+  if(!f || deserializeJson(d,f) || d["schema"]!=1) return false;
+  if(!d["people"].is<JsonArray>() || !d["cards"].is<JsonArray>() || !d["pending"].is<JsonArray>()) return false;
+  if(d["people"].size()>MAX_PEOPLE || d["cards"].size()>MAX_CARDS || d["pending"].size()>MAX_PENDING) return false;
+  std::set<String> ids,uids;
+  for(JsonObject o:d["people"].as<JsonArray>()) {
+    String id=o["id"].as<String>(), name=o["name"].as<String>();
+    if(!id.length() || !name.length() || !ids.insert(id).second) return false;
+    people.push_back({id,name});
+  }
+  for(JsonObject o:d["cards"].as<JsonArray>()) {
+    String uid=o["uid"].as<String>(), id=o["person"].as<String>();
+    if(!uid.length() || !personExists(id) || !uids.insert(uid).second) return false;
+    cards.push_back({uid,id});
+  }
+  for(JsonVariant v:d["pending"].as<JsonArray>()) {
+    String uid=v.as<String>(); if(!uid.length() || !uids.insert(uid).second) return false;
+    pending.push_back({uid});
+  }
+  return true;
+}
+
+// Append-only journal: clock anchors and cancellations never rewrite coffee records.
+// A damaged line blocks further bookings; preserve the file for recovery via filemanager.
+bool scanJournal(const std::function<void(JsonDocument&)>& visit) {
+  if(!LittleFS.exists("/journal.ndjson")) return true;
+  File f=LittleFS.open("/journal.ndjson","r"); if(!f) return false;
+  while(f.available()) {
+    String line; line.reserve(320); bool newline=false;
+    while(f.available()) { char ch=f.read(); if(ch=='\n') {newline=true; break;} if(line.length()>=1024) return false; line+=ch; }
+    JsonDocument d;
+    if(!newline || !line.length() || deserializeJson(d,line)) return false;
+    String kind=d["kind"].as<String>();
+    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock")) return false;
+    visit(d); serviceBuzzer(); delay(0);
+  }
+  return true;
+}
+bool appendRecord(JsonDocument& d) {
+  if(!mounted || !journalOK || storageError.length()) return false;
+  if(LittleFS.totalBytes()-LittleFS.usedBytes()<16384) { storageError="LittleFS voll: bitte sichern und archivieren"; return false; }
+  d["id"]=lastId+1;
+  File f=LittleFS.open("/journal.ndjson","a"); if(!f) return false;
+  size_t expected=measureJson(d), n=serializeJson(d,f); size_t end=f.print('\n'); f.flush(); f.close();
+  if(n!=expected || end!=1) { journalOK=false; storageError="Journal-Schreibfehler"; return false; }
+  ++lastId; return true;
+}
+void loadJournal() {
+  uint32_t prev=0; bool valid=true;
+  journalOK=scanJournal([&](JsonDocument& d) {
+    uint32_t id=d["id"]; if(id<=prev) valid=false; prev=id; lastId=std::max(lastId,id);
+    String kind=d["kind"].as<String>();
+    if(kind=="clock") {
+      Anchor a; a.epoch=d["epoch"].as<int64_t>(); a.uptime=d["uptime"].as<uint64_t>();
+      if(!cafe::validTime(a.epoch) || !d["session"].is<String>()) valid=false;
+      else anchors[d["session"].as<String>()]=a;
+    } else if(kind=="cancel") {
+      uint32_t target=d["target"]|0U; if(!target || target>=id) valid=false;
+      cancellations.insert(target);
+    } else if(!d["person"].is<String>() || !d["session"].is<String>() || !d["uptime"].is<uint64_t>()) valid=false;
+  }) && valid;
+  if(!journalOK) storageError="Journal beschaedigt: sichern und pruefen";
+}
+int64_t recordEpoch(JsonDocument& d) {
+  String boot=d["session"].as<String>(); auto it=anchors.find(boot);
+  Anchor a; if(it!=anchors.end()) a=it->second;
+  return cafe::anchoredEpoch(d["epoch"]|int64_t(0),d["uptime"].as<uint64_t>(),a.epoch,a.uptime);
+}
+void anchorClock() {
+  int64_t now=epochNow(); if(!now || anchors.count(session) || !journalOK || storageError.length()) return;
+  Anchor a; a.epoch=now; a.uptime=uptimeMs(); JsonDocument d;
+  d["kind"]="clock"; d["epoch"]=now; d["uptime"]=a.uptime; d["session"]=session;
+  if(appendRecord(d)) anchors[session]=a;
+  else if(!storageError.length()) storageError="Zeitanker nicht gespeichert";
+}
+
+void handleCard(const String& uid) {
+  if(!mounted || !journalOK || storageError.length()) {
+    message("Nicht gebucht","Speicherfehler","Bitte Weboberflaeche pruefen",false); beep(3,1000,70); return;
+  }
+  String person=personFor(uid);
+  if(!person.length()) {
+    bool exists=false; for(const auto& p:pending) if(p.uid==uid) exists=true;
+    if(!exists) {
+      if(pending.size()>=MAX_PENDING) { message("Nicht gebucht","Chip-Liste voll","Bitte im Browser aufraeumen",false); return; }
+      pending.push_back({uid});
+      if(!saveRegistry()) { pending.pop_back(); message("Nicht gespeichert","Speicherfehler","Bitte Browser pruefen",false); beep(3,1000,70); return; }
+    }
+    message("Neuer Chip",uid,"Bitte im Browser zuordnen",false); beep(2,1500,90); return;
+  }
+  JsonDocument d; d["kind"]="coffee"; d["person"]=person;
+  d["epoch"]=epochNow(); d["session"]=session; d["uptime"]=uptimeMs();
+  if(!appendRecord(d)) { message("Nicht gebucht","Speicherfehler","Bitte im Browser pruefen",false); beep(3,1000,70); return; }
+  message("+1 Kaffee",personName(person),epochNow()?"Gespeichert. Guten Genuss!":"Gespeichert - Zeit noch offen",true);
+  beep(1,BUZZER_FREQUENCY,BUZZER_MS);
+}
+void pollRFID() {
+  uint32_t now=millis(); if(!readerOK || uint32_t(now-lastPoll)<100) return; lastPoll=now;
+  digitalWrite(pins::LCD_CS,HIGH);
+  byte atqa[2], len=sizeof(atqa); auto result=rfid.PICC_WakeupA(atqa,&len);
+  bool present=result==MFRC522::STATUS_OK || result==MFRC522::STATUS_COLLISION;
+  if(present) {
+    lastPresence=now;
+    if(rfid.PICC_ReadCardSerial()) {
+      String uid;
+      for(byte i=0;i<rfid.uid.size;i++) { if(i) uid+=':'; if(rfid.uid.uidByte[i]<16) uid+='0'; uid+=String(rfid.uid.uidByte[i],HEX); }
+      uid.toUpperCase(); rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+      bool fresh=!latched; latched=true;
+      if(fresh && (!acceptedOnce || uint32_t(now-lastAccepted)>=3000)) {
+        acceptedOnce=true; lastAccepted=now; handleCard(uid);
+      }
+    }
+  } else if(latched && uint32_t(now-lastPresence)>700) latched=false;
+}
+
+void sendJson(JsonDocument& d,int code=200) {
+  String s; serializeJson(d,s); web.sendHeader("Cache-Control","no-store"); web.send(code,"application/json; charset=utf-8",s);
+}
+void error(int code,const String& msg) { JsonDocument d; d["error"]=msg; sendJson(d,code); }
+bool auth(bool mutation=false) {
+  if(!web.authenticate("admin",cfg.adminPassword.c_str())) { web.requestAuthentication(BASIC_AUTH,"Cafe R107"); return false; }
+  if(mutation && web.header("X-Cafe-Request")!="1") { error(403,"Anfrage nicht erlaubt"); return false; }
+  return true;
+}
+bool body(JsonDocument& d) {
+  if(web.arg("plain").length()>4096 || deserializeJson(d,web.arg("plain")) || !d.is<JsonObject>()) {error(400,"Ungueltiges JSON");return false;} return true;
+}
+bool writable() { if(storageError.length() || !mounted || !journalOK) {error(503,"Speicher nicht bereit: "+storageError);return false;}return true; }
+String cleanName(String s) { s.trim(); for(size_t i=0;i<s.length();i++) if((uint8_t)s[i]<32) return ""; return s.length()<=48?s:String(""); }
+
+void apiStatus() {
+  if(!auth()) return; JsonDocument d;
+  d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
+  d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.ssid;
+  d["epoch"]=epochNow(); d["readerOK"]=readerOK; d["storageError"]=storageError;
+  d["journalOK"]=journalOK; d["fsUsed"]=mounted?LittleFS.usedBytes():0; d["fsTotal"]=mounted?LittleFS.totalBytes():0;
+  d["session"]=session; d["uptime"]=uptimeMs(); d["pendingCount"]=pending.size(); d["filemanagerPort"]=FM_PORT;
+  sendJson(d);
+}
+void apiRegistry() {
+  if(!auth()) return; JsonDocument d;
+  JsonArray ps=d["people"].to<JsonArray>(); for(const auto& p:people) {auto o=ps.add<JsonObject>();o["id"]=p.id;o["name"]=p.name;}
+  JsonArray cs=d["cards"].to<JsonArray>(); for(const auto& c:cards) {auto o=cs.add<JsonObject>();o["uid"]=c.uid;o["person"]=c.person;}
+  JsonArray us=d["pending"].to<JsonArray>(); for(const auto& p:pending) us.add(p.uid);
+  sendJson(d);
+}
+void apiPerson() {
+  if(!auth(true) || !writable()) return; JsonDocument d; if(!body(d)) return;
+  String name=cleanName(d["name"]|""), id=d["id"]|"";
+  if(!name.length()) {error(400,"Name erforderlich, maximal 48 UTF-8-Bytes");return;}
+  if(!id.length()) {
+    if(people.size()>=MAX_PEOPLE) {error(409,"Maximal 50 Personen");return;}
+    do {id="p"+randomHex().substring(0,8);} while(personExists(id));
+    people.push_back({id,name});
+    if(!saveRegistry()) {people.pop_back();error(507,"Speichern fehlgeschlagen");return;}
+  } else {
+    auto it=std::find_if(people.begin(),people.end(),[&](const Person& p){return p.id==id;});
+    if(it==people.end()) {error(404,"Person nicht gefunden");return;}
+    String old=it->name; it->name=name;
+    if(!saveRegistry()) {it->name=old;error(507,"Speichern fehlgeschlagen");return;}
+  }
+  JsonDocument out;out["id"]=id;out["ok"]=true;sendJson(out);
+}
+void apiAssign() {
+  if(!auth(true) || !writable()) return; JsonDocument d;if(!body(d)) return;
+  String uid=d["uid"].as<String>(), id=d["person"].as<String>();
+  if(!personExists(id)) {error(400,"Person nicht gefunden");return;}
+  bool pendingExists=false;for(const auto& p:pending) if(p.uid==uid) pendingExists=true;
+  bool cardExists=personFor(uid).length();
+  if(!pendingExists && !cardExists) {error(404,"Chip zuerst am Leser vorhalten");return;}
+  if(!cardExists && cards.size()>=MAX_CARDS) {error(409,"Maximal 100 Chips");return;}
+  auto oldCards=cards;auto oldPending=pending;
+  if(cardExists) {for(auto& c:cards) if(c.uid==uid)c.person=id;}
+  else cards.push_back({uid,id});
+  pending.erase(std::remove_if(pending.begin(),pending.end(),[&](const Pending& p){return p.uid==uid;}),pending.end());
+  if(!saveRegistry()) {cards=oldCards;pending=oldPending;error(507,"Speichern fehlgeschlagen");return;}
+  JsonDocument out;out["ok"]=true;sendJson(out);
+}
+void apiForget() {
+  if(!auth(true) || !writable()) return;JsonDocument d;if(!body(d)) return;String uid=d["uid"].as<String>();
+  auto oldCards=cards;auto oldPending=pending;
+  cards.erase(std::remove_if(cards.begin(),cards.end(),[&](const Card& c){return c.uid==uid;}),cards.end());
+  pending.erase(std::remove_if(pending.begin(),pending.end(),[&](const Pending& p){return p.uid==uid;}),pending.end());
+  if(!saveRegistry()) {cards=oldCards;pending=oldPending;error(507,"Speichern fehlgeschlagen");return;}
+  JsonDocument out;out["ok"]=true;sendJson(out);
+}
+
+void apiReport() {
+  if(!auth()) return;
+  if(!mounted || !journalOK) {error(503,"Journal nicht lesbar");return;}
+  int64_t now=epochNow(); String week=web.hasArg("week")?web.arg("week"):String(cafe::weekKey(now).c_str());
+  String month=web.hasArg("month")?web.arg("month"):String(cafe::monthKey(now).c_str());
+  std::map<String,cafe::Counts> counts; std::set<String> weeks,months;
+  for(const auto& p:people) counts[p.id]=cafe::Counts();
+  cafe::Counts total;
+  bool ok=scanJournal([&](JsonDocument& e) {
+    if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
+    int64_t t=recordEpoch(e);String id=e["person"].as<String>();
+    counts[id].add(t,now);total.add(t,now);
+    if(t) {
+      String wk=cafe::weekKey(t).c_str(), mo=cafe::monthKey(t).c_str(); weeks.insert(wk);months.insert(mo);
+    }
+  });
+  if(!ok) {journalOK=false;storageError="Journal nicht lesbar";error(503,storageError);return;}
+  // Selected historical periods can differ from the current calendar week/month.
+  for(auto& p:counts) {p.second.week=0;p.second.month=0;}total.week=0;total.month=0;
+  ok=scanJournal([&](JsonDocument& e) {
+    if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
+    int64_t t=recordEpoch(e);if(!t) return; String id=e["person"].as<String>();
+    if(week.length() && week==cafe::weekKey(t).c_str()) {++counts[id].week;++total.week;}
+    if(month.length() && month==cafe::monthKey(t).c_str()) {++counts[id].month;++total.month;}
+  });
+  if(!ok) {error(503,"Journal nicht lesbar");return;}
+  JsonDocument out;out["week"]=week;out["month"]=month;
+  auto addCounts=[](JsonObject o,const cafe::Counts& c){o["total"]=c.total;o["today"]=c.today;o["week"]=c.week;o["month"]=c.month;o["undated"]=c.undated;};
+  addCounts(out["totals"].to<JsonObject>(),total);
+  JsonArray ps=out["people"].to<JsonArray>();
+  for(const auto& p:counts) {auto o=ps.add<JsonObject>();o["id"]=p.first;o["name"]=personName(p.first);addCounts(o,p.second);}
+  JsonArray ws=out["weeks"].to<JsonArray>();for(auto it=weeks.rbegin();it!=weeks.rend();++it)ws.add(*it);
+  JsonArray ms=out["months"].to<JsonArray>();for(auto it=months.rbegin();it!=months.rend();++it)ms.add(*it);
+  sendJson(out);
+}
+void apiHistory() {
+  if(!auth()) return;if(!mounted || !journalOK) {error(503,"Journal nicht lesbar");return;}
+  uint32_t before=web.hasArg("before")?strtoul(web.arg("before").c_str(),nullptr,10):UINT32_MAX;
+  struct Row {uint32_t id;String person;int64_t epoch;bool cancelled;};std::vector<Row> rows;bool more=false;
+  bool ok=scanJournal([&](JsonDocument& e){
+    uint32_t id=e["id"]|0U;if(e["kind"]!="coffee" || id>=before)return;
+    rows.push_back({id,e["person"].as<String>(),recordEpoch(e),bool(cancellations.count(id))});
+    if(rows.size()>50) {rows.erase(rows.begin());more=true;}
+  });
+  if(!ok) {error(503,"Journal nicht lesbar");return;}
+  JsonDocument d;d["more"]=more;auto arr=d["rows"].to<JsonArray>();
+  for(auto it=rows.rbegin();it!=rows.rend();++it){auto o=arr.add<JsonObject>();o["id"]=it->id;o["person"]=it->person;o["name"]=personName(it->person);o["epoch"]=it->epoch;o["cancelled"]=it->cancelled;}
+  sendJson(d);
+}
+void apiCancel() {
+  if(!auth(true) || !writable())return;JsonDocument d;if(!body(d))return;uint32_t target=d["id"]|0U;
+  if(cancellations.count(target)) {JsonDocument out;out["ok"]=true;sendJson(out);return;}
+  bool found=false;bool ok=scanJournal([&](JsonDocument& e){if(e["kind"]=="coffee" && e["id"].as<uint32_t>()==target)found=true;});
+  if(!ok || !found) {error(404,"Buchung nicht gefunden");return;}
+  JsonDocument e;e["kind"]="cancel";e["target"]=target;e["epoch"]=epochNow();e["session"]=session;e["uptime"]=uptimeMs();
+  if(!appendRecord(e)) {error(507,"Storno nicht gespeichert");return;}
+  cancellations.insert(target);JsonDocument out;out["ok"]=true;sendJson(out);
+}
+void apiTime() {
+  if(!auth(true) || !writable())return;JsonDocument d;if(!body(d))return;int64_t epoch=d["epoch"]|int64_t(0);
+  if(!cafe::validTime(epoch)) {error(400,"Uhrzeit ausserhalb 2024-2037");return;}
+  // One anchor per boot avoids silently moving previously undated records later.
+  struct timeval tv{};tv.tv_sec=epoch;settimeofday(&tv,nullptr);anchorClock();
+  JsonDocument out;out["ok"]=storageError.length()==0;sendJson(out);
+}
+void apiConfig() {
+  if(!auth(true) || !writable())return;JsonDocument d;if(!body(d))return;Config old=cfg;
+  if(!loadConfig()) {cfg=old;error(503,"Gespeicherte Konfiguration nicht lesbar");return;}
+  if(d["ssid"].is<String>())cfg.ssid=d["ssid"].as<String>();
+  if(d["wifiPassword"].is<String>())cfg.wifiPassword=d["wifiPassword"].as<String>();
+  if(d["apPassword"].is<String>() && d["apPassword"].as<String>().length())cfg.apPassword=d["apPassword"].as<String>();
+  if(d["adminPassword"].is<String>() && d["adminPassword"].as<String>().length())cfg.adminPassword=d["adminPassword"].as<String>();
+  if(cfg.ssid.length()>32 || cfg.wifiPassword.length()>63 || cfg.apPassword.length()<8 || cfg.apPassword.length()>63 || cfg.adminPassword.length()<8 || cfg.adminPassword.length()>63) {cfg=old;error(400,"SSID max.32, Passwoerter 8-63 Zeichen (Client-WLAN auch leer)");return;}
+  if(!saveConfig()){cfg=old;error(507,"Konfiguration nicht gespeichert");return;}
+  JsonDocument out;out["ok"]=true;out["restartRequired"]=true;sendJson(out);
+  // Apply after restart: don't interrupt the HTTP response/AP or change active auth mid-request.
+  cfg=old;
+}
+void apiExport() {
+  if(!auth())return;if(!mounted || !journalOK){error(503,"Journal nicht lesbar");return;}
+  // CSV uses stable person IDs and current display names, including explicit cancellations.
+  web.sendHeader("Content-Disposition","attachment; filename=Cafe_R107.csv");
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);web.send(200,"text/csv; charset=utf-8","");
+  web.sendContent("\xEF\xBB\xBFid;person_id;name;zeit_berlin;epoch;storniert\r\n");
+  scanJournal([&](JsonDocument& e){
+    if(e["kind"]!="coffee")return;uint32_t id=e["id"]|0U;int64_t t=recordEpoch(e);
+    String name=personName(e["person"].as<String>());name.replace("\"","\"\"");
+    if(name.startsWith("=")||name.startsWith("+")||name.startsWith("-")||name.startsWith("@"))name="'"+name;
+    String line=String(id)+";"+e["person"].as<String>()+";\""+name+"\";"+cafe::dateKey(t,"%Y-%m-%d %H:%M:%S").c_str()+";";
+    if(t)line+=String(static_cast<unsigned long>(t));line+=";";line+=cancellations.count(id)?"ja":"nein";line+="\r\n";web.sendContent(line);
+  });
+  web.sendContent("");
+}
+
+uint32_t fmFlags(fs::FS&,String,uint32_t flags) {
+  if(flags & ESPFMfGK::flagIsValidAction)return flags & ~ESPFMfGK::flagIsValidAction;
+  if(flags & ESPFMfGK::flagIsValidTargetFilename)return flags & ~ESPFMfGK::flagIsValidTargetFilename;
+  return ESPFMfGK::flagCanDelete|ESPFMfGK::flagCanRename|ESPFMfGK::flagCanEdit|ESPFMfGK::flagAllowPreview|
+    ESPFMfGK::flagCanGZip|ESPFMfGK::flagCanDownload|ESPFMfGK::flagAllowInZip|ESPFMfGK::flagCanUpload|ESPFMfGK::flagCanCreateNew;
+}
+void setupWeb() {
+  const char* headers[]={"X-Cafe-Request"};web.collectHeaders(headers,1);
+  web.on("/api/status",HTTP_GET,apiStatus);web.on("/api/registry",HTTP_GET,apiRegistry);
+  web.on("/api/report",HTTP_GET,apiReport);web.on("/api/history",HTTP_GET,apiHistory);
+  web.on("/api/person",HTTP_POST,apiPerson);web.on("/api/assign",HTTP_POST,apiAssign);
+  web.on("/api/forget",HTTP_POST,apiForget);web.on("/api/cancel",HTTP_POST,apiCancel);
+  web.on("/api/time",HTTP_POST,apiTime);web.on("/api/config",HTTP_POST,apiConfig);
+  web.on("/api/export.csv",HTTP_GET,apiExport);
+  web.onNotFound([](){
+    if(!auth())return;
+    String uri=web.uri();String path,mime;
+    if(uri=="/"||uri=="/index.html"){path="/www/index.html";mime="text/html; charset=utf-8";}
+    else if(uri=="/app.js"){path="/www/app.js";mime="application/javascript; charset=utf-8";}
+    else if(uri=="/domain.js"){path="/www/domain.js";mime="application/javascript; charset=utf-8";}
+    else if(uri=="/style.css"){path="/www/style.css";mime="text/css; charset=utf-8";}
+    else {error(404,"Nicht gefunden");return;}
+    File f=LittleFS.open(path,"r");if(!f){web.send(503,"text/plain; charset=utf-8","LittleFS-Webdateien fehlen. Siehe README zur Erstinstallation.");return;}
+    web.sendHeader("Cache-Control","no-cache");web.streamFile(f,mime);f.close();
+  });
+  web.begin();
+  if(mounted) {
+    filemgr.AddFS(LittleFS,"LittleFS",true);filemgr.checkFileFlags=fmFlags;
+    filemgr.WebPageTitle="Cafe R107 - Dateien";filemgr.textareaCharset="accept-charset=\"utf-8\"";
+    filemgr.HttpUsername="admin";filemgr.HttpPassword=cfg.adminPassword;
+    filemgr.ExtraHTMLfoot="<p>Vor Aenderungen alle Dateien sichern. Nach manuellen Daten-/Konfigurationsaenderungen ESP neu starten.</p>";
+    fmReady=filemgr.begin();
+  }
+}
+void serviceNetwork() {
+  if(WiFi.status()==WL_CONNECTED && !ntpStarted) {configTzTime(cafe::TZ_BERLIN,"pool.ntp.org","time.cloudflare.com");ntpStarted=true;}
+  if(cfg.ssid.length() && WiFi.status()!=WL_CONNECTED && uint32_t(millis()-lastWifiRetry)>=30000) {lastWifiRetry=millis();WiFi.reconnect();}
+}
+void setup() {
+  Serial.begin(115200);pinMode(pins::BUZZER,OUTPUT);digitalWrite(pins::BUZZER,LOW);
+  esp_timer_create_args_t timerArgs{};timerArgs.callback=cutoffTone;timerArgs.name="buzzer-cutoff";
+  bool timerOK=esp_timer_create(&timerArgs,&buzzerCutoff)==ESP_OK;
+  buzzerReady=timerOK && ledcSetup(BUZZER_CHANNEL,BUZZER_FREQUENCY,10)>0;
+  if(buzzerReady){ledcAttachPin(pins::BUZZER,BUZZER_CHANNEL);toneHz(0);}
+  pinMode(pins::RFID_CS,OUTPUT);digitalWrite(pins::RFID_CS,HIGH);
+  pinMode(pins::LCD_CS,OUTPUT);digitalWrite(pins::LCD_CS,HIGH);
+  SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(0);lcd.setTextWrap(false);
+  digitalWrite(pins::LCD_CS,HIGH);rfid.PCD_Init();delay(50);
+  byte version=rfid.PCD_ReadRegister(MFRC522::VersionReg);readerOK=version!=0 && version!=0xff;
+  setenv("TZ",cafe::TZ_BERLIN,1);tzset();session=randomHex();
+  cfg.apPassword=randomHex().substring(0,12);cfg.adminPassword=randomHex().substring(0,12);
+  mounted=LittleFS.begin(false);
+  if(!mounted)storageError="LittleFS nicht bereit - kein automatisches Formatieren";
+  else if(!loadConfig())storageError="config.json ungueltig - Wiederherstellung noetig";
+  if(mounted && !storageError.length()) {
+    if(!loadRegistry())storageError="registry.json ungueltig";
+    else loadJournal();
+  }
+  WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.setHostname("cafe-r107");
+  bool apOK=WiFi.softAP(apName().c_str(),cfg.apPassword.c_str());
+  if(cfg.ssid.length()){WiFi.setAutoReconnect(true);WiFi.begin(cfg.ssid.c_str(),cfg.wifiPassword.c_str());}
+  setupWeb();
+  Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
+  if(storageError.length())Serial.println(storageError);
+  frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,1,CREAM);
+  center("AP: "+cfg.apPassword,125,1,GOLD);center("Login: admin",150,1,CREAM);
+  center(cfg.adminPassword,170,1,GOLD);center(WiFi.softAPIP().toString(),210,1,CREAM);
+  displayAt=millis();beep(1,2000,80);
+}
+void loop() {
+  serviceBuzzer();serviceNetwork();anchorClock();
+  pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
+  uint32_t now=millis();
+  if((currentScreen==Screen::Boot && uint32_t(now-displayAt)>15000) || (currentScreen==Screen::Result && uint32_t(now-displayAt)>4000))idleScreen();
+  if(currentScreen==Screen::Idle && networkLine()!=lastNetworkLine)idleScreen();
+  delay(1);
+}

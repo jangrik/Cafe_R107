@@ -1,0 +1,31 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Calendar and offline timestamp tests
+        run: g++ -std=c++11 -Wall -Wextra -Werror -Iinclude test/native/test_domain.cpp -o /tmp/test-domain && /tmp/test-domain
+      - name: Web tests
+        run: npm test && npm run check
+      - name: Install PlatformIO
+        run: pip install platformio==6.1.18
+      - name: Build firmware
+        run: pio run
+      - name: Build LittleFS image
+        run: pio run -t buildfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cafe-R107-firmware-and-filesystem
+          path: |
+            .pio/build/cafe_r107/firmware.bin
+            .pio/build/cafe_r107/littlefs.bin

@@ -1,0 +1,10 @@
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+config.json
+registry.json
+journal.ndjson
+backups/
+secrets.h
+
