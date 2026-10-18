@@ -1,8 +1,24 @@
-# Cafe R107 · Version 1.0.6
+# Cafe R107 · Version 1.0.7
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.7: Gerätebefehle direkt im Browser
+
+Die vier Befehle **Neustart, Display On, Off und Auto** sind zusätzlich per
+GET verfügbar. Im Browser anmelden und die passende Adresse öffnen:
+
+- `http://192.168.123.60/api/restart`
+- `http://192.168.123.60/api/display/on`
+- `http://192.168.123.60/api/display/off`
+- `http://192.168.123.60/api/display/auto`
+
+Über den Access Point dieselben Pfade an `http://192.168.4.1` verwenden.
+GET benötigt nur den vorhandenen Admin-Login, keinen zusätzlichen Header.
+POST funktioniert unverändert mit `X-Cafe-Request: 1`. Andere schreibende APIs
+bleiben POST-Endpunkte. Display-Off bleibt auslösbar durch neue RFID-/TOF-Aktivität.
+Nur Firmware aktualisieren: `git pull` und `pio run -t upload`; kein FS-Upload.
 
 ## Neu in 1.0.6: Display-Off mit weiter aktiver Aufweckfunktion
 
@@ -18,17 +34,18 @@ Nur Firmware aktualisieren, kein LittleFS-Upload erforderlich.
 ## Neu in 1.0.5: Geräte-API
 
 Alle Endpunkte verwenden den vorhandenen HTTP-Basic-Login **admin** mit dem
-Admin-Kennwort. Schreibende Befehle erfordern **POST** und den Header
-`X-Cafe-Request: 1`. Ein Aufruf über die Browser-Adresszeile (GET) löst keinen
-Neustart und keine Displayumschaltung aus. Zugriff über AP- und Client-Adresse.
+Admin-Kennwort. POST-Aufrufe erfordern den Header
+`X-Cafe-Request: 1`. Seit 1.0.7 sind Neustart und Display On/Off/Auto zusätzlich
+als GET für die Browser-Adresszeile verfügbar, ohne diesen Header.
+Zugriff über AP- und Client-Adresse.
 
 | Methode | Pfad | Funktion |
 |---|---|---|
-| POST | `/api/restart` | Neustart anfordern; HTTP 202, danach etwa 500 ms Verzögerung |
+| GET / POST | `/api/restart` | Neustart anfordern; HTTP 202, danach etwa 500 ms Verzögerung |
 | GET | `/api/display` | Aktuellen Lichtzustand und Modus lesen |
-| POST | `/api/display/on` | Beleuchtung dauerhaft einschalten |
-| POST | `/api/display/off` | Sofort aus wie bei abgelaufener Zeit; RFID/TOF bleiben aktiv |
-| POST | `/api/display/auto` | Bisherige Zeit-/TOF-Automatik wieder aktivieren |
+| GET / POST | `/api/display/on` | Beleuchtung dauerhaft einschalten |
+| GET / POST | `/api/display/off` | Sofort aus wie bei abgelaufener Zeit; RFID/TOF bleiben aktiv |
+| GET / POST | `/api/display/auto` | Bisherige Zeit-/TOF-Automatik wieder aktivieren |
 | POST | `/api/display` | Alternativ JSON `{"mode":"on"}`, `off` oder `auto` |
 | GET | `/api/tof` | Letzte TOF-Messung mit Einheit, Gültigkeit und Alter |
 

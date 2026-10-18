@@ -470,7 +470,7 @@ void apiTof() {
   d["presence"]=presenceGate.present();sendJson(d);
 }
 void apiRestart() {
-  if(!auth(true))return;
+  if(!auth(web.method()==HTTP_POST))return;
   uint32_t now=millis();restartRequest.schedule(now);
   JsonDocument d;d["ok"]=true;d["restarting"]=true;
   d["delayMs"]=restartRequest.remaining(now);
@@ -638,11 +638,15 @@ uint32_t fmFlags(fs::FS&,String,uint32_t flags) {
 }
 void setupWeb() {
   const char* headers[]={"X-Cafe-Request"};web.collectHeaders(headers,1);
+  web.on("/api/restart",HTTP_GET,apiRestart);
   web.on("/api/restart",HTTP_POST,apiRestart);
   web.on("/api/display",HTTP_GET,apiDisplayGet);
   web.on("/api/display",HTTP_POST,apiDisplayPost);
+  web.on("/api/display/on",HTTP_GET,[](){if(auth())setDisplayMode("on");});
   web.on("/api/display/on",HTTP_POST,[](){if(auth(true))setDisplayMode("on");});
+  web.on("/api/display/off",HTTP_GET,[](){if(auth())setDisplayMode("off");});
   web.on("/api/display/off",HTTP_POST,[](){if(auth(true))setDisplayMode("off");});
+  web.on("/api/display/auto",HTTP_GET,[](){if(auth())setDisplayMode("auto");});
   web.on("/api/display/auto",HTTP_POST,[](){if(auth(true))setDisplayMode("auto");});
   web.on("/api/tof",HTTP_GET,apiTof);
   web.on("/api/status",HTTP_GET,apiStatus);web.on("/api/registry",HTTP_GET,apiRegistry);
