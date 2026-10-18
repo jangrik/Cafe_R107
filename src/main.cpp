@@ -145,9 +145,12 @@ bool loadConfig() {
   if(!LittleFS.exists("/config.json")) return saveConfig();
   File f=LittleFS.open("/config.json","r"); JsonDocument d;
   if(!f || deserializeJson(d,f) || d["schema"]!=1) return false;
-  cfg.ssid=d["ssid"].as<String>(); cfg.wifiPassword=d["wifiPassword"].as<String>();
-  cfg.apPassword=d["apPassword"].as<String>(); cfg.adminPassword=d["adminPassword"].as<String>();
-  return cfg.apPassword.length()>=8 && cfg.apPassword.length()<=63 && cfg.adminPassword.length()>=8;
+  if(!d["ssid"].is<String>() || !d["wifiPassword"].is<String>() || !d["apPassword"].is<String>() || !d["adminPassword"].is<String>()) return false;
+  Config next;
+  next.ssid=d["ssid"].as<String>(); next.wifiPassword=d["wifiPassword"].as<String>();
+  next.apPassword=d["apPassword"].as<String>(); next.adminPassword=d["adminPassword"].as<String>();
+  if(next.ssid.length()>32 || next.wifiPassword.length()>63 || next.apPassword.length()<8 || next.apPassword.length()>63 || next.adminPassword.length()<8 || next.adminPassword.length()>63) return false;
+  cfg=next; return true;
 }
 bool loadRegistry() {
   if(!LittleFS.exists("/registry.json")) return saveRegistry();
@@ -193,7 +196,7 @@ bool appendRecord(JsonDocument& d) {
   if(!mounted || !journalOK || storageError.length()) return false;
   if(LittleFS.totalBytes()-LittleFS.usedBytes()<16384) { storageError="LittleFS voll: bitte sichern und archivieren"; return false; }
   d["id"]=lastId+1;
-  File f=LittleFS.open("/journal.ndjson","a"); if(!f) return false;
+  File f=LittleFS.open("/journal.ndjson","a"); if(!f) {storageError="Journal kann nicht geoeffnet werden";return false;}
   size_t expected=measureJson(d), n=serializeJson(d,f); size_t end=f.print('\n'); f.flush(); f.close();
   if(n!=expected || end!=1) { journalOK=false; storageError="Journal-Schreibfehler"; return false; }
   ++lastId; return true;
