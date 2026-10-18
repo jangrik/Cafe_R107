@@ -23,7 +23,7 @@
 
 namespace pins {
 constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
-constexpr uint8_t LCD_BL=14, TOF_SDA=16, TOF_SCL=17;
+constexpr uint8_t LCD_BL=21, TOF_SDA=16, TOF_SCL=17;
 }
 constexpr uint16_t BG=0x1083, CREAM=0xFF18, GOLD=0xED68;
 constexpr uint16_t BUZZER_FREQUENCY=2500, BUZZER_MS=200;

@@ -1,14 +1,19 @@
-# Cafe R107 · Version 1.0.3
+# Cafe R107 · Version 1.0.4
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 
+## Neu in 1.0.4
+
+- LCD-Hintergrundbeleuchtung BL liegt auf **GPIO 21**, statt GPIO 14.
+- TOF bleibt an SDA 16 / SCL 17. Nur Firmware-Upload nötig.
+
 ## Neu in 1.0.3: Hintergrundbeleuchtung und Näherung
 
-**Vor dem Flashen:** LCD **BL von 3V trennen und an GPIO 14 anschließen**.
+**Vor dem Flashen:** LCD **BL von 3V trennen und an GPIO 21 anschließen**.
 Der BL-Anschluss des Waveshare-Moduls ist ein Steuereingang; keine zusätzliche
-Transistorstufe erforderlich. VCC des LCD bleibt an 3V. Niemals GPIO 14 parallel
+Transistorstufe erforderlich. VCC des LCD bleibt an 3V. Niemals GPIO 21 parallel
 zur bisherigen festen 3V-Verbindung anschließen.
 
 | VL53L0X-Modul | ESP32 |
@@ -103,7 +108,7 @@ GPIO-Nummern; keine Annahme über einen herausgeführten GPIO 21 oder 5.
 | RC522 | 3.3V / GND | 3V / G |
 | RC522 | SDA (SPI-CS) / RST | 25 / 22 |
 | RC522 | SCK / MOSI / MISO | 18 / 23 / 19 |
-| ST7789 LCD | VCC / GND / BL | 3V / G / GPIO 14 |
+| ST7789 LCD | VCC / GND / BL | 3V / G / GPIO 21 |
 | ST7789 LCD | CLK / DIN | 18 / 23, gemeinsam mit RFID |
 | ST7789 LCD | CS / DC / RST | 26 / 27 / 33 |
 | Summer-Treiber | Basisansteuerung | GPIO 32 über 270 Ω |
