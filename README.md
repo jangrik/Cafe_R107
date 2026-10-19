@@ -1,10 +1,10 @@
-# Cafe R107 · Version 1.0.8
+# Cafe R107 · Version 1.0.9
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 
-## Neu in 1.0.8: Chip-Zeitpunkte und Sensorüberwachung
+## Neu in 1.0.9: Chip-Zeitpunkte und Sensorüberwachung , Display gedreht
 
 ### Update ohne vollständigen LittleFS-Upload
 

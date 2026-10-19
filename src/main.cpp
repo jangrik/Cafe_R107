@@ -843,7 +843,7 @@ void setup() {
   if(buzzerReady){ledcAttachPin(pins::BUZZER,BUZZER_CHANNEL);toneHz(0);}
   pinMode(pins::RFID_CS,OUTPUT);digitalWrite(pins::RFID_CS,HIGH);
   pinMode(pins::LCD_CS,OUTPUT);digitalWrite(pins::LCD_CS,HIGH);
-  SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(0);lcd.setTextWrap(false);
+  SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(2);lcd.setTextWrap(false);
   digitalWrite(pins::LCD_CS,HIGH);rfid.PCD_Init();delay(50);
   readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);readerOK=cafe::readerVersionPlausible(readerVersion);
   rfidDiagnostics.healthy=readerOK;if(!readerOK)rfidDiagnostics.error="not_initialized";
@@ -864,7 +864,7 @@ void setup() {
   tofDiagnostics.error=tofOK?"waiting_for_measurement":"not_initialized";
   Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
   if(storageError.length())Serial.println(storageError);
-  frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,1,CREAM);
+  frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,2,CREAM);
   center("AP: "+cfg.apPassword,125,2,GOLD);center("Login: admin",150,2,CREAM);
   center(cfg.adminPassword,170,2,GOLD);center(WiFi.softAPIP().toString(),210,2,CREAM);
   displayAt=millis();rankingCycle.reset(displayAt);beep(1,2000,80);
