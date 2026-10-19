@@ -12,3 +12,12 @@ export function configPayload(form) {
   if(form.adminPassword)d.adminPassword=form.adminPassword;
   return d;
 }
+
+export function displayChipTime(epoch) {
+  if(epoch===undefined || epoch===null)return '—';
+  if(!epoch)return 'Uhrzeit unbekannt';
+  return new Intl.DateTimeFormat('de-DE',{
+    timeZone:'Europe/Berlin',day:'2-digit',month:'2-digit',year:'numeric',
+    hour:'2-digit',minute:'2-digit',second:'2-digit'
+  }).format(new Date(epoch*1000));
+}

@@ -1,6 +1,7 @@
 #include "Domain.h"
 #include "DisplayLogic.h"
 #include "Backlight.h"
+#include "HealthLogic.h"
 #include <cassert>
 #include <cstdlib>
 #include <iostream>
@@ -116,5 +117,25 @@ int main(){
  restart.schedule(UINT32_MAX-100); // Repeated requests do not postpone the reboot.
  assert(!restart.due(298));assert(restart.remaining(298)==1);
  assert(restart.due(299));assert(restart.remaining(299)==0);
+ // The supervisor runs once a minute, with no retry storm or millis wrap bug.
+ cafe::HealthSchedule supervisor;supervisor.reset(1000);
+ assert(!supervisor.takeIfDue(60999));assert(supervisor.takeIfDue(61000));
+ assert(!supervisor.takeIfDue(61001));assert(supervisor.takeIfDue(121000));
+ supervisor.reset(UINT32_MAX-1000);
+ assert(!supervisor.takeIfDue(58998));assert(supervisor.takeIfDue(58999));
+ assert(std::strcmp(cafe::tofHealthError(true,true,true,100,50000),"")==0);
+ // Completed but invalid range values still refresh measurement age, so no reset.
+ assert(std::strcmp(cafe::tofHealthError(true,true,true,100,900000),"")==0);
+ assert(std::strcmp(cafe::tofHealthError(true,true,true,5000,50000),"measurement_stalled")==0);
+ assert(std::strcmp(cafe::tofHealthError(true,false,true,100,50000),"i2c_not_responding")==0);
+ assert(std::strcmp(cafe::tofHealthError(false,true,false,0,50000),"not_initialized")==0);
+ assert(std::strcmp(cafe::tofHealthError(true,true,false,0,5000),"measurement_stalled")==0);
+ uint8_t goodProbes[]={0x92,0x92,0x92},oneGlitch[]={0xff,0x92,0x92},badProbes[]={0xff,0x92,0xff};
+ assert(cafe::readerProbeOK(0x92,goodProbes,3));
+ assert(cafe::readerProbeOK(0x92,oneGlitch,3));
+ assert(!cafe::readerProbeOK(0x92,badProbes,3));
+ assert(!cafe::readerVersionPlausible(0));assert(!cafe::readerVersionPlausible(0xff));
+ // Per-chip metadata can use the same persistent boot anchor, even after a reset.
+ assert(cafe::anchoredEpoch(0,5000,1760000000,65000)==1759999940);
  std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings, display cadence and backlight/presence passed.\n";
 }

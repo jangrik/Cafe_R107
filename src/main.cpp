@@ -20,6 +20,7 @@
 #include "Domain.h"
 #include "DisplayLogic.h"
 #include "Backlight.h"
+#include "HealthLogic.h"
 
 namespace pins {
 constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
@@ -39,6 +40,19 @@ struct Person { String id, name; };
 struct Card { String uid, person; };
 struct Pending { String uid; };
 struct Anchor { int64_t epoch=0; uint64_t uptime=0; };
+struct LastSeen {String session;int64_t epoch=0;uint64_t uptime=0,sequence=0;};
+struct SensorDiagnostics {
+  bool healthy=false;uint32_t checks=0,attempts=0,successes=0,checkedAt=0,recoveredAt=0;
+  String error,lastError,lastRecoveryReason;
+};
+SensorDiagnostics tofDiagnostics,rfidDiagnostics;
+cafe::HealthSchedule healthSchedule;
+uint8_t readerVersion=0;
+uint32_t tofInitAt=0;
+std::map<String,LastSeen> lastSeen;
+uint64_t lastSeenSequence=0;
+String lastSeenError;
+bool lastSeenWritable=true;
 struct Config { String ssid, wifiPassword, apPassword, adminPassword; } cfg;
 std::vector<Person> people;
 std::vector<Card> cards;
@@ -72,6 +86,9 @@ void serviceBacklight() {
   }
 }
 void setupTof() {
+  tofOK=false;tofSampleValid=false;tofDistance=0;tofInitAt=millis();
+  presenceGate=cafe::PresenceGate();
+  Wire.end();
   Wire.begin(pins::TOF_SDA,pins::TOF_SCL,100000);
   Wire.setTimeOut(10);
   tof.setBus(&Wire);tof.setTimeout(200);
@@ -81,7 +98,7 @@ void setupTof() {
     if(tofOK) {tof.startContinuous(100);tofOK=tof.last_status==0;}
   }
   tof.setTimeout(20);
-  lastTofResult=millis();
+  // Preserve the real last measurement timestamp across recovery attempts.
   Serial.println(tofOK ? "VL53L0X bereit (SDA16/SCL17, Naehe 80 cm)" :
     "VL53L0X fehlt/antwortet nicht. Aufwecken per RFID bleibt aktiv.");
 }
@@ -94,9 +111,15 @@ void serviceTof() {
   if(tof.last_status==0 && (ready&0x07)) {
     // Read only a completed continuous measurement, never start/wait for a shot.
     mm=tof.readRangeContinuousMillimeters();
-    valid=!tof.timeoutOccurred() && tof.last_status==0 && mm>=20 && mm<=2000;
-    lastTofResult=now;tofDistance=valid?mm:0;
-    tofHasSample=true;tofSampleValid=valid;
+    bool transportOK=!tof.timeoutOccurred() && tof.last_status==0;
+    valid=transportOK && mm>=20 && mm<=2000;
+    tofDistance=valid?mm:0;tofSampleValid=valid;
+    if(transportOK) {
+      lastTofResult=now;tofHasSample=true;
+      tofDiagnostics.healthy=true;tofDiagnostics.error="";
+    } else {
+      tofDiagnostics.healthy=false;tofDiagnostics.error="i2c_measurement_error";
+    }
   } else {
     if(uint32_t(now-lastTofResult)<1000)return;
     tofDistance=0;tofSampleValid=false;
@@ -105,6 +128,45 @@ void serviceTof() {
     backlightTimer.approach(now);
     serviceBacklight();
   }
+}
+
+void beginRecovery(SensorDiagnostics& d,const String& reason) {
+  ++d.attempts;d.recoveredAt=millis();d.lastRecoveryReason=reason;
+  d.lastError=reason;d.error=reason;d.healthy=false;
+}
+void serviceDeviceHealth() {
+  uint32_t now=millis();if(!healthSchedule.takeIfDue(now))return;
+  ++tofDiagnostics.checks;tofDiagnostics.checkedAt=now;
+  Wire.beginTransmission(0x29);bool ack=Wire.endTransmission()==0;
+  String reason=cafe::tofHealthError(tofOK,ack,tofHasSample,
+      uint32_t(now-lastTofResult),uint32_t(now-tofInitAt));
+  if(reason.length()) {
+    beginRecovery(tofDiagnostics,reason);
+    Serial.println("TOF recovery: "+reason);
+    setupTof();
+    if(tofOK) {++tofDiagnostics.successes;tofDiagnostics.error="waiting_for_measurement";}
+    else tofDiagnostics.error="reinitialization_failed";
+  } else {tofDiagnostics.healthy=true;tofDiagnostics.error="";}
+
+  ++rfidDiagnostics.checks;rfidDiagnostics.checkedAt=millis();
+  digitalWrite(pins::LCD_CS,HIGH);
+  uint8_t values[3];for(unsigned i=0;i<3;++i)values[i]=rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  if(readerOK && cafe::readerProbeOK(readerVersion,values,3)) {
+    rfidDiagnostics.healthy=true;rfidDiagnostics.error="";return;
+  }
+  beginRecovery(rfidDiagnostics,readerOK?"version_register_mismatch":"not_initialized");
+  Serial.println("RFID recovery: "+rfidDiagnostics.lastRecoveryReason);
+  // Dedicated RST line resets the peripheral only. Do not clear the card latch:
+  // a chip held at the reader during recovery must not create another booking.
+  pinMode(pins::RFID_RST,OUTPUT);digitalWrite(pins::RFID_RST,LOW);delay(2);
+  digitalWrite(pins::RFID_RST,HIGH);delay(50);rfid.PCD_Init();
+  readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  for(unsigned i=0;i<3;++i)values[i]=rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  readerOK=cafe::readerProbeOK(readerVersion,values,3);
+  rfidDiagnostics.healthy=readerOK;
+  if(readerOK) {++rfidDiagnostics.successes;rfidDiagnostics.error="";}
+  else rfidDiagnostics.error="reinitialization_failed";
+  // No ESP.restart(): clock, network, registry and journal stay alive.
 }
 
 uint64_t uptimeMs() { return static_cast<uint64_t>(esp_timer_get_time()/1000); }
@@ -213,6 +275,59 @@ bool saveJson(const char* path,JsonDocument& doc) {
   if(!LittleFS.rename(tmp,path)) { LittleFS.remove(tmp); return false; }
   return true;
 }
+bool saveLastSeen() {
+  if(!mounted || !lastSeenWritable)return false;
+  JsonDocument d;d["schema"]=1;d["sequence"]=lastSeenSequence;
+  auto entries=d["entries"].to<JsonArray>();
+  for(const auto& item:lastSeen) {
+    auto o=entries.add<JsonObject>();o["uid"]=item.first;
+    o["session"]=item.second.session;o["epoch"]=item.second.epoch;
+    o["uptime"]=item.second.uptime;o["sequence"]=item.second.sequence;
+  }
+  if(d.overflowed())return false;
+  return saveJson("/lastseen.json",d);
+}
+bool loadLastSeen() {
+  if(!LittleFS.exists("/lastseen.json"))return true; // Existing installations migrate lazily.
+  File f=LittleFS.open("/lastseen.json","r");JsonDocument d;
+  if(!f || deserializeJson(d,f) || d["schema"]!=1 || !d["entries"].is<JsonArray>() ||
+     d["entries"].size()>MAX_CARDS+MAX_PENDING || !d["sequence"].is<uint64_t>())return false;
+  std::map<String,LastSeen> loaded;
+  uint64_t sequence=d["sequence"].as<uint64_t>();
+  for(JsonObject o:d["entries"].as<JsonArray>()) {
+    String uid=o["uid"]|"";LastSeen seen;
+    if(!uid.length() || !o["session"].is<String>() || !o["epoch"].is<int64_t>() ||
+       !o["uptime"].is<uint64_t>() || !o["sequence"].is<uint64_t>() || loaded.count(uid))return false;
+    seen.session=o["session"].as<String>();seen.epoch=o["epoch"].as<int64_t>();
+    seen.uptime=o["uptime"].as<uint64_t>();seen.sequence=o["sequence"].as<uint64_t>();
+    if(seen.sequence>sequence || (seen.epoch && !cafe::validTime(seen.epoch)))return false;
+    loaded[uid]=seen;
+  }
+  lastSeen=loaded;lastSeenSequence=sequence;return true;
+}
+void rememberChipContact(const String& uid) {
+  if(!lastSeen.count(uid) && lastSeen.size()>=MAX_CARDS+MAX_PENDING) {
+    // Keep current chip assignments preferentially; bound memory even for stray tags.
+    auto victim=lastSeen.end();
+    for(auto it=lastSeen.begin();it!=lastSeen.end();++it) {
+      if(personFor(it->first).length())continue;
+      if(victim==lastSeen.end() || it->second.sequence<victim->second.sequence)victim=it;
+    }
+    if(victim==lastSeen.end())victim=lastSeen.begin();
+    lastSeen.erase(victim);
+  }
+  LastSeen seen;seen.session=session;seen.epoch=epochNow();seen.uptime=uptimeMs();
+  seen.sequence=++lastSeenSequence;lastSeen[uid]=seen;
+  // One atomic snapshot per new chip contact, never per polling cycle.
+  if(saveLastSeen())lastSeenError="";
+  else lastSeenError="Chip-Zeitstempel nicht dauerhaft gespeichert (lastseen.json pruefen)";
+}
+int64_t lastSeenEpoch(const LastSeen& seen) {
+  auto it=anchors.find(seen.session);Anchor anchor;
+  if(it!=anchors.end())anchor=it->second;
+  return cafe::anchoredEpoch(seen.epoch,seen.uptime,anchor.epoch,anchor.uptime);
+}
+
 bool saveConfig() {
   JsonDocument d; d["schema"]=1; d["ssid"]=cfg.ssid; d["wifiPassword"]=cfg.wifiPassword;
   d["apPassword"]=cfg.apPassword; d["adminPassword"]=cfg.adminPassword;
@@ -420,7 +535,7 @@ void pollRFID() {
       uid.toUpperCase(); rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
       bool fresh=!latched; latched=true;
       // Wake on every new chip contact, even unknown chips or cooldown hits.
-      if(fresh) {backlightTimer.chip(now);serviceBacklight();}
+      if(fresh) {backlightTimer.chip(now);serviceBacklight();rememberChipContact(uid);}
       if(fresh && (!acceptedOnce || uint32_t(now-lastAccepted)>=3000)) {
         acceptedOnce=true; lastAccepted=now; handleCard(uid);
       }
@@ -460,6 +575,31 @@ void apiDisplayPost() {
   JsonDocument d;if(!body(d))return;
   setDisplayMode(d["mode"]|"");
 }
+void sensorDiagnosticJson(JsonObject o,const SensorDiagnostics& diag) {
+  o["healthy"]=diag.healthy;o["error"]=diag.error;o["lastError"]=diag.lastError;
+  o["checks"]=diag.checks;o["recoveryAttempts"]=diag.attempts;
+  o["successfulReinitializations"]=diag.successes;o["lastRecoveryReason"]=diag.lastRecoveryReason;
+  if(diag.checks)o["lastCheckAgeMs"]=uint32_t(millis()-diag.checkedAt);else o["lastCheckAgeMs"]=nullptr;
+  if(diag.attempts)o["lastRecoveryAgeMs"]=uint32_t(millis()-diag.recoveredAt);else o["lastRecoveryAgeMs"]=nullptr;
+}
+void tofDiagnosticJson(JsonObject o) {
+  sensorDiagnosticJson(o,tofDiagnostics);
+  String stalled=cafe::tofHealthError(tofOK,true,tofHasSample,
+      uint32_t(millis()-lastTofResult),uint32_t(millis()-tofInitAt));
+  if(stalled.length()) {
+    o["healthy"]=false;
+    if(!tofDiagnostics.error.length() || tofDiagnostics.error=="waiting_for_measurement")o["error"]=stalled;
+  }
+}
+void apiDiagnostics() {
+  if(!auth())return;JsonDocument d;
+  tofDiagnosticJson(d["tof"].to<JsonObject>());
+  sensorDiagnosticJson(d["rfid"].to<JsonObject>(),rfidDiagnostics);
+  d["rfid"]["versionRegister"]=readerVersion;
+  d["lastSeenError"]=lastSeenError;d["automaticEspRestart"]=false;
+  d["checkIntervalMs"]=cafe::HEALTH_INTERVAL_MS;d["tofStallMs"]=cafe::TOF_STALL_MS;sendJson(d);
+}
+
 void apiTof() {
   if(!auth())return;
   uint32_t age=uint32_t(millis()-lastTofResult);
@@ -467,7 +607,7 @@ void apiTof() {
   JsonDocument d;d["available"]=tofOK;d["valid"]=valid;
   if(valid)d["distanceMm"]=tofDistance;else d["distanceMm"]=nullptr;
   if(tofHasSample)d["ageMs"]=age;else d["ageMs"]=nullptr;
-  d["presence"]=presenceGate.present();sendJson(d);
+  d["presence"]=presenceGate.present();tofDiagnosticJson(d["diagnostics"].to<JsonObject>());sendJson(d);
 }
 void apiRestart() {
   if(!auth(web.method()==HTTP_POST))return;
@@ -481,6 +621,9 @@ void apiStatus() {
   if(!auth()) return; JsonDocument d;
   d["backlightOn"]=backlightOn;d["backlightMode"]=backlightTimer.modeName();d["tofOK"]=tofOK;
   d["distanceMm"]=tofDistance;d["presence"]=presenceGate.present();
+  d["lastSeenRevision"]=lastSeenSequence;d["lastSeenError"]=lastSeenError;
+  tofDiagnosticJson(d["tofDiagnostics"].to<JsonObject>());
+  sensorDiagnosticJson(d["rfidDiagnostics"].to<JsonObject>(),rfidDiagnostics);
   d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
   d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.ssid;
   d["epoch"]=epochNow(); d["readerOK"]=readerOK; d["storageError"]=storageError;
@@ -493,6 +636,8 @@ void apiRegistry() {
   JsonArray ps=d["people"].to<JsonArray>(); for(const auto& p:people) {auto o=ps.add<JsonObject>();o["id"]=p.id;o["name"]=p.name;}
   JsonArray cs=d["cards"].to<JsonArray>(); for(const auto& c:cards) {auto o=cs.add<JsonObject>();o["uid"]=c.uid;o["person"]=c.person;}
   JsonArray us=d["pending"].to<JsonArray>(); for(const auto& p:pending) us.add(p.uid);
+  auto seen=d["lastSeen"].to<JsonObject>();
+  for(const auto& item:lastSeen)seen[item.first]=lastSeenEpoch(item.second);
   sendJson(d);
 }
 void apiPerson() {
@@ -649,6 +794,7 @@ void setupWeb() {
   web.on("/api/display/auto",HTTP_GET,[](){if(auth())setDisplayMode("auto");});
   web.on("/api/display/auto",HTTP_POST,[](){if(auth(true))setDisplayMode("auto");});
   web.on("/api/tof",HTTP_GET,apiTof);
+  web.on("/api/diagnostics",HTTP_GET,apiDiagnostics);
   web.on("/api/status",HTTP_GET,apiStatus);web.on("/api/registry",HTTP_GET,apiRegistry);
   web.on("/api/report",HTTP_GET,apiReport);web.on("/api/history",HTTP_GET,apiHistory);
   web.on("/api/person",HTTP_POST,apiPerson);web.on("/api/assign",HTTP_POST,apiAssign);
@@ -692,7 +838,8 @@ void setup() {
   pinMode(pins::LCD_CS,OUTPUT);digitalWrite(pins::LCD_CS,HIGH);
   SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(0);lcd.setTextWrap(false);
   digitalWrite(pins::LCD_CS,HIGH);rfid.PCD_Init();delay(50);
-  byte version=rfid.PCD_ReadRegister(MFRC522::VersionReg);readerOK=version!=0 && version!=0xff;
+  readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);readerOK=cafe::readerVersionPlausible(readerVersion);
+  rfidDiagnostics.healthy=readerOK;if(!readerOK)rfidDiagnostics.error="not_initialized";
   setenv("TZ",cafe::TZ_BERLIN,1);tzset();session=randomHex();
   cfg.apPassword=randomHex().substring(0,12);cfg.adminPassword=randomHex().substring(0,12);
   mounted=LittleFS.begin(false);
@@ -701,11 +848,13 @@ void setup() {
   if(mounted && !storageError.length()) {
     if(!loadRegistry())storageError="registry.json ungueltig";
     else loadJournal();
+    if(!loadLastSeen()) {lastSeenWritable=false;lastSeenError="lastseen.json ungueltig: bitte sichern und pruefen";}
   }
   WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.setHostname("cafe-r107");
   bool apOK=WiFi.softAP(apName().c_str(),cfg.apPassword.c_str());
   if(cfg.ssid.length()){WiFi.setAutoReconnect(true);WiFi.begin(cfg.ssid.c_str(),cfg.wifiPassword.c_str());}
-  setupWeb();setupTof();
+  setupWeb();setupTof();healthSchedule.reset(millis());
+  tofDiagnostics.error=tofOK?"waiting_for_measurement":"not_initialized";
   Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
   if(storageError.length())Serial.println(storageError);
   frame();center("Start / WLAN",65,2,CREAM);center(apName(),100,1,CREAM);
@@ -714,7 +863,7 @@ void setup() {
   displayAt=millis();rankingCycle.reset(displayAt);beep(1,2000,80);
 }
 void loop() {
-  serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();
+  serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();serviceDeviceHealth();
   pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
   serviceDisplay();
   // File operations and the HTTP response have completed before restarting.

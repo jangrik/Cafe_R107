@@ -1,8 +1,112 @@
-# Cafe R107 · Version 1.0.7
+# Cafe R107 · Version 1.0.8
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.8: Chip-Zeitpunkte und Sensorüberwachung
+
+### Update ohne vollständigen LittleFS-Upload
+
+1. `git pull` und anschließend nur die Firmware hochladen: `pio run -t upload`.
+2. Im Dateimanager auf Port 8080 das Verzeichnis **`/www/`** öffnen.
+3. Genau diese drei Dateien aus dem lokalen Projekt einzeln ersetzen:
+
+   | Lokale Datei | Ziel im ESP-LittleFS |
+   |---|---|
+   | `data/www/domain.js` | `/www/domain.js` |
+   | `data/www/style.css` | `/www/style.css` |
+   | `data/www/app.js` | `/www/app.js` |
+
+   `domain.js` zuerst hochladen, anschließend die beiden anderen Dateien.
+   Wenn der Dateimanager im flachen Modus arbeitet, beim Zielnamen den vollen
+   `/www/...`-Pfad verwenden. Kein zusätzliches `www`-Unterverzeichnis erzeugen.
+4. Danach die normale Website mit **Strg+F5** neu laden.
+
+**Kein `uploadfs`!** `config.json`, `registry.json` und `journal.ndjson` nicht
+ersetzen oder löschen. `index.html` und die Dateimanagerdateien bleiben ebenfalls
+unverändert. Eine Sicherung vor dem Update ist trotzdem sinnvoll.
+
+### Datum/Zeit neben Chip-ID
+
+Unter „Personen & Chips“ steht direkt bei der UID ausschließlich Datum und
+Uhrzeit des letzten neu erkannten Chipkontakts, einschließlich Sekunden.
+Die Beschriftung „Zuletzt vorgehalten:“ wird nicht verwendet. Das gilt für
+unbekannte und zugeordnete Chips, auch ohne Buchung oder innerhalb der Sperrzeit.
+Liegenlassen aktualisiert den Zeitpunkt nicht ständig.
+
+Die Metadaten werden pro neuem Kontakt atomar in **`/lastseen.json`** gesichert,
+getrennt von Konfiguration, Zuordnungen und Journal. Die Datei wird vom Gerät
+selbst angelegt, gehört ins Backup und darf beim Update nicht aus `data/`
+überschrieben werden. Es werden maximal 130 UIDs vorgehalten; alte unzugeordnete
+UIDs werden bei Bedarf zuerst verdrängt. Kein Flash-Schreiben im 100-ms-Poll.
+
+Bei bestehenden Chips ist der Zeitpunkt vor dem ersten Kontakt unter 1.0.8
+nicht rekonstruierbar: zunächst „—“. Bei Kontakt ohne Uhrzeit erscheint
+„Uhrzeit unbekannt“. Der Start-/Laufzeitbezug erlaubt später dieselbe Datierung
+wie bei Buchungen, sofern ein Zeitanker dieser Sitzung gespeichert wird.
+Im Web wird Europe/Berlin mit Sommerzeit verwendet.
+Fehler dieser zusätzlichen Datei erscheinen als Warnung und blockieren keine
+ansonsten speicherbaren Kaffeebuchungen. Eine beschädigte `lastseen.json` wird
+nicht automatisch überschrieben; vor Reparatur über den Dateimanager sichern.
+Die Website aktualisiert die Zeitpunkte beim nächsten Poll (etwa acht Sekunden),
+ohne gerade bearbeitete Namen/Auswahlfelder zu überschreiben.
+
+### TOF und RFID: Prüfung jede Minute
+
+Ein Supervisor läuft alle **60 Sekunden**, auch nach fehlgeschlagener
+Initialisierung beim Start. Keine unbedingten periodischen Neustarts:
+
+- **TOF:** I²C-ACK an 0x29 prüfen. Mehr als fünf Sekunden ohne abgeschlossene
+  Messung gelten als Stillstand. Der nächste Minutencheck initialisiert dann
+  den dedizierten I²C-Bus und den VL53L0X inklusive Dauermessung neu.
+- Ungültige Entfernungen bei weiterhin abgeschlossenen Messungen (z. B. kein
+  geeignetes Ziel) lösen **keine** Wiederherstellung aus. Kommunikationsfehler
+  dürfen das Alter der letzten abgeschlossenen Messung nicht zurücksetzen.
+- Bei erfolglosem Versuch erfolgt der nächste erst beim folgenden Minutencheck.
+  Eine erfolgreiche Neuinitialisierung gilt erst nach einer neuen abgeschlossenen
+  Messung wieder als gesund. Eine alte Distanz wird nicht als neue ausgegeben.
+- **RFID:** VersionReg dreimal lesen und mit der beim Start erkannten Version
+  vergleichen. Ein einzelner Ausreißer wird toleriert. Bei wiederholten Fehlern
+  RST an GPIO 22 pulsen und PCD_Init ausführen, danach erneut prüfen.
+- Keine Karte im Feld beziehungsweise ein normaler Karten-Timeout ist kein
+  RFID-Fehler. Die vorhandene Kartensperre bleibt bei Wiederherstellung erhalten,
+  damit ein liegen gelassener Chip keine zusätzliche Buchung erzeugt.
+- Es gibt **keinen automatischen ESP-Neustart**. Uhrzeit, Netzwerk und
+  gespeicherte Daten bleiben bei diesen Wiederherstellungen erhalten.
+
+Ohne XSHUT-/Versorgungsschaltung kann ein hart blockierter oder elektrisch
+fehlerhafter TOF unter Umständen nicht per Software wiederbelebt werden.
+Ein RFID-Registertest beweist die SPI-Erreichbarkeit, nicht die vollständige
+Funktion der Antenne. Fehler provozieren und am echten Gerät prüfen.
+
+### Diagnose-API
+
+**GET `/api/diagnostics`** mit dem bisherigen Admin-Login liefert `tof` und
+`rfid` mit:
+
+- `healthy`, `error`: aktueller Diagnosezustand bzw. erkannte Ursache;
+- `lastError`: zuletzt beim Supervisor festgestellte Fehlerursache;
+- `checks`, `recoveryAttempts`, `successfulReinitializations`;
+- `lastRecoveryReason`, `lastCheckAgeMs`, `lastRecoveryAgeMs`;
+- RFID zusätzlich `versionRegister`;
+- `automaticEspRestart:false`, `checkIntervalMs:60000`, `tofStallMs:5000`.
+
+Vor der ersten Prüfung/Wiederherstellung sind die zugehörigen Alterswerte null.
+Initialisierungserfolge zählen erfolgreiche Initialisierungsaufrufe; beim TOF
+bestätigt erst die folgende abgeschlossene Messung `healthy:true`.
+Mögliche Fehler: `i2c_not_responding`, `measurement_stalled`, `not_initialized`,
+`i2c_measurement_error`, `version_register_mismatch`, `reinitialization_failed`.
+`waiting_for_measurement` ist ein vorübergehender Zustand nach Initialisierung.
+
+Die TOF-Diagnose steht zusätzlich unter `diagnostics` in `/api/tof` und beide
+Diagnosen unter `tofDiagnostics`/`rfidDiagnostics` in `/api/status`.
+Die Geräteseite zeigt kurze Sensorzustände mit Wiederherstellungszählern.
+`available` in `/api/tof` bedeutet weiterhin erfolgreiche Initialisierung;
+für den tatsächlichen Betrieb zusätzlich `valid`, `ageMs` und die Diagnose prüfen.
+Die Zähler gelten seit dem letzten ESP-Start und werden nicht ins Flash geloggt.
+`/api/registry` bleibt kompatibel und ergänzt `lastSeen` als UID→Epoch-Abbildung;
+0 steht für einen erfassten Kontakt ohne zuordenbare Uhrzeit.
 
 ## Neu in 1.0.7: Gerätebefehle direkt im Browser
 
@@ -297,6 +401,7 @@ LittleFS bestehen; **Filesystem-Upload ersetzt das komplette Dateisystem**.
 | `/config.json` | Client-WLAN, AP- und Admin-Kennwort |
 | `/registry.json` | Personen, Chipzuordnungen, neue Chips |
 | `/journal.ndjson` | Anhängendes Journal: Kaffee, Storno, Zeitanker |
+| `/lastseen.json` | Letzte Chipkontakte (ab 1.0.8, vom Gerät angelegt) |
 | `/www/*` | Weboberfläche ohne externe CDN-Abhängigkeiten |
 | `/fm.*` | ESPFMfGK-Oberfläche |
 
