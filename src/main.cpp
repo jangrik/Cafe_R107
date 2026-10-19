@@ -47,7 +47,13 @@ struct SensorDiagnostics {
 };
 SensorDiagnostics tofDiagnostics,rfidDiagnostics;
 cafe::HealthSchedule healthSchedule;
-uint8_t readerVersion=0;
+uint8_t readerVersion=0,readerTxControl=0;
+cafe::ReaderFailures readerFailures;
+MFRC522::StatusCode readerWakeStatus=MFRC522::STATUS_TIMEOUT;
+MFRC522::StatusCode readerSelectStatus=MFRC522::STATUS_TIMEOUT;
+bool readerPolled=false,readerSelected=false,readerHasUid=false,readerReadFault=false;
+uint32_t readerUidAt=0,readerPolls=0,readerUidReads=0,readerProbeAt=0;
+String readerLastUid;
 uint32_t tofInitAt=0;
 cafe::TofRecovery tofRecovery;
 String tofOriginalError,tofInitError,tofInitStage;
@@ -177,6 +183,32 @@ void beginRecovery(SensorDiagnostics& d,const String& reason) {
   ++d.attempts;d.recoveredAt=millis();d.lastRecoveryReason=reason;
   d.lastError=reason;d.error=reason;d.healthy=false;
 }
+bool probeReader() {
+  digitalWrite(pins::LCD_CS,HIGH);
+  uint8_t versions[3],antennas[3];
+  for(unsigned i=0;i<3;++i) {
+    versions[i]=rfid.PCD_ReadRegister(MFRC522::VersionReg);
+    antennas[i]=rfid.PCD_ReadRegister(MFRC522::TxControlReg)&0x03;
+  }
+  readerTxControl=antennas[2];readerProbeAt=millis();
+  return cafe::readerProbeOK(readerVersion,versions,3) &&
+      cafe::readerProbeOK(0x03,antennas,3);
+}
+void recoverReader(const String& reason) {
+  beginRecovery(rfidDiagnostics,reason);
+  Serial.println("RFID recovery: "+reason);
+  digitalWrite(pins::LCD_CS,HIGH);
+  pinMode(pins::RFID_RST,OUTPUT);digitalWrite(pins::RFID_RST,LOW);delay(2);
+  digitalWrite(pins::RFID_RST,HIGH);delay(50);rfid.PCD_Init();
+  // Retain the boot reference unless startup never produced a plausible version.
+  if(!cafe::readerVersionPlausible(readerVersion))
+    readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  readerOK=probeReader();readerFailures.observe(false);readerReadFault=false;
+  rfidDiagnostics.healthy=readerOK;
+  if(readerOK) {++rfidDiagnostics.successes;rfidDiagnostics.error="";}
+  else rfidDiagnostics.error="reinitialization_failed";
+  // Preserve latched and cooldown: a held chip must not create another booking.
+}
 void serviceDeviceHealth() {
   uint32_t now=millis();if(!healthSchedule.takeIfDue(now))return;
   ++tofDiagnostics.checks;tofDiagnostics.checkedAt=now;
@@ -196,23 +228,13 @@ void serviceDeviceHealth() {
   }
 
   ++rfidDiagnostics.checks;rfidDiagnostics.checkedAt=millis();
-  digitalWrite(pins::LCD_CS,HIGH);
-  uint8_t values[3];for(unsigned i=0;i<3;++i)values[i]=rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  if(readerOK && cafe::readerProbeOK(readerVersion,values,3)) {
+  bool registersOK=probeReader();
+  if(readerOK && registersOK && !readerReadFault) {
     rfidDiagnostics.healthy=true;rfidDiagnostics.error="";return;
   }
-  beginRecovery(rfidDiagnostics,readerOK?"version_register_mismatch":"not_initialized");
-  Serial.println("RFID recovery: "+rfidDiagnostics.lastRecoveryReason);
-  // Dedicated RST line resets the peripheral only. Do not clear the card latch:
-  // a chip held at the reader during recovery must not create another booking.
-  pinMode(pins::RFID_RST,OUTPUT);digitalWrite(pins::RFID_RST,LOW);delay(2);
-  digitalWrite(pins::RFID_RST,HIGH);delay(50);rfid.PCD_Init();
-  readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  for(unsigned i=0;i<3;++i)values[i]=rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  readerOK=cafe::readerProbeOK(readerVersion,values,3);
-  rfidDiagnostics.healthy=readerOK;
-  if(readerOK) {++rfidDiagnostics.successes;rfidDiagnostics.error="";}
-  else rfidDiagnostics.error="reinitialization_failed";
+  String readerReason=!readerOK?"not_initialized":
+      !registersOK?"register_or_antenna_mismatch":"repeated_read_errors";
+  recoverReader(readerReason);
   // No ESP.restart(): clock, network, registry and journal stay alive.
 }
 
@@ -573,13 +595,20 @@ void pollRFID() {
   uint32_t now=millis(); if(!readerOK || uint32_t(now-lastPoll)<100) return; lastPoll=now;
   digitalWrite(pins::LCD_CS,HIGH);
   byte atqa[2], len=sizeof(atqa); auto result=rfid.PICC_WakeupA(atqa,&len);
+  readerPolled=true;++readerPolls;readerWakeStatus=result;
+  bool readFault=result!=MFRC522::STATUS_OK && result!=MFRC522::STATUS_TIMEOUT &&
+      result!=MFRC522::STATUS_COLLISION;
   bool present=result==MFRC522::STATUS_OK || result==MFRC522::STATUS_COLLISION;
   if(present) {
     lastPresence=now;
-    if(rfid.PICC_ReadCardSerial()) {
+    readerSelectStatus=rfid.PICC_Select(&rfid.uid);readerSelected=true;
+    readFault=result==MFRC522::STATUS_OK && readerSelectStatus!=MFRC522::STATUS_OK &&
+        readerSelectStatus!=MFRC522::STATUS_COLLISION;
+    if(readerSelectStatus==MFRC522::STATUS_OK) {
       String uid;
       for(byte i=0;i<rfid.uid.size;i++) { if(i) uid+=':'; if(rfid.uid.uidByte[i]<16) uid+='0'; uid+=String(rfid.uid.uidByte[i],HEX); }
-      uid.toUpperCase(); rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+      uid.toUpperCase();readerReadFault=false;readerHasUid=true;readerUidAt=now;++readerUidReads;readerLastUid=uid;
+      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
       bool fresh=!latched; latched=true;
       // Wake on every new chip contact, even unknown chips or cooldown hits.
       if(fresh) {backlightTimer.chip(now);serviceBacklight();rememberChipContact(uid);}
@@ -588,6 +617,10 @@ void pollRFID() {
       }
     }
   } else if(latched && uint32_t(now-lastPresence)>700) latched=false;
+  readerFailures.observe(readFault);
+  if(readerFailures.repeated()) {
+    readerReadFault=true;rfidDiagnostics.healthy=false;rfidDiagnostics.error="repeated_read_errors";
+  }
 }
 
 void sendJson(JsonDocument& d,int code=200) {
@@ -629,6 +662,32 @@ void sensorDiagnosticJson(JsonObject o,const SensorDiagnostics& diag) {
   if(diag.checks)o["lastCheckAgeMs"]=uint32_t(millis()-diag.checkedAt);else o["lastCheckAgeMs"]=nullptr;
   if(diag.attempts)o["lastRecoveryAgeMs"]=uint32_t(millis()-diag.recoveredAt);else o["lastRecoveryAgeMs"]=nullptr;
 }
+void rfidDiagnosticJson(JsonObject o) {
+  sensorDiagnosticJson(o,rfidDiagnostics);
+  o["versionRegister"]=readerVersion;o["antennaEnabled"]=(readerTxControl&3)==3;
+  o["antennaCheckAgeMs"]=uint32_t(millis()-readerProbeAt);
+  o["antennaControlBits"]=readerTxControl;
+  o["verification"]="registers_only";o["cardLatched"]=latched;
+  o["polls"]=readerPolls;o["uidReads"]=readerUidReads;
+  o["consecutiveReadErrors"]=readerFailures.count();o["readFaultPending"]=readerReadFault;
+  if(readerPolled) {
+    o["lastWakeStatus"]=uint8_t(readerWakeStatus);
+    o["lastWakeStatusText"]=String(rfid.GetStatusCodeName(readerWakeStatus));
+    o["lastPollAgeMs"]=uint32_t(millis()-lastPoll);
+  } else {o["lastWakeStatus"]=nullptr;o["lastWakeStatusText"]=nullptr;o["lastPollAgeMs"]=nullptr;}
+  if(readerSelected) {
+    o["lastSelectStatus"]=uint8_t(readerSelectStatus);
+    o["lastSelectStatusText"]=String(rfid.GetStatusCodeName(readerSelectStatus));
+  } else {o["lastSelectStatus"]=nullptr;o["lastSelectStatusText"]=nullptr;}
+  if(readerHasUid) {o["lastUid"]=readerLastUid;o["lastUidAgeMs"]=uint32_t(millis()-readerUidAt);}
+  else {o["lastUid"]=nullptr;o["lastUidAgeMs"]=nullptr;}
+}
+void apiRfidReinit() {
+  if(!auth(web.method()==HTTP_POST))return;
+  recoverReader("manual_request");
+  JsonDocument d;d["ok"]=readerOK;rfidDiagnosticJson(d["rfid"].to<JsonObject>());
+  sendJson(d,readerOK?200:503);
+}
 void tofDiagnosticJson(JsonObject o) {
   sensorDiagnosticJson(o,tofDiagnostics);
   o["originalError"]=tofOriginalError;o["initError"]=tofInitError;
@@ -645,8 +704,7 @@ void tofDiagnosticJson(JsonObject o) {
 void apiDiagnostics() {
   if(!auth())return;JsonDocument d;
   tofDiagnosticJson(d["tof"].to<JsonObject>());
-  sensorDiagnosticJson(d["rfid"].to<JsonObject>(),rfidDiagnostics);
-  d["rfid"]["versionRegister"]=readerVersion;
+  rfidDiagnosticJson(d["rfid"].to<JsonObject>());
   d["lastSeenError"]=lastSeenError;d["automaticEspRestart"]=false;
   d["checkIntervalMs"]=cafe::HEALTH_INTERVAL_MS;d["tofStallMs"]=cafe::TOF_STALL_MS;sendJson(d);
 }
@@ -674,7 +732,7 @@ void apiStatus() {
   d["distanceMm"]=tofDistance;d["presence"]=presenceGate.present();
   d["lastSeenRevision"]=lastSeenSequence;d["lastSeenError"]=lastSeenError;
   tofDiagnosticJson(d["tofDiagnostics"].to<JsonObject>());
-  sensorDiagnosticJson(d["rfidDiagnostics"].to<JsonObject>(),rfidDiagnostics);
+  rfidDiagnosticJson(d["rfidDiagnostics"].to<JsonObject>());
   d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
   d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.ssid;
   d["epoch"]=epochNow(); d["readerOK"]=readerOK; d["storageError"]=storageError;
@@ -844,6 +902,8 @@ void setupWeb() {
   web.on("/api/display/off",HTTP_POST,[](){if(auth(true))setDisplayMode("off");});
   web.on("/api/display/auto",HTTP_GET,[](){if(auth())setDisplayMode("auto");});
   web.on("/api/display/auto",HTTP_POST,[](){if(auth(true))setDisplayMode("auto");});
+  web.on("/api/rfid/reinit",HTTP_GET,apiRfidReinit);
+  web.on("/api/rfid/reinit",HTTP_POST,apiRfidReinit);
   web.on("/api/tof",HTTP_GET,apiTof);
   web.on("/api/diagnostics",HTTP_GET,apiDiagnostics);
   web.on("/api/status",HTTP_GET,apiStatus);web.on("/api/registry",HTTP_GET,apiRegistry);
@@ -890,6 +950,7 @@ void setup() {
   SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(2);lcd.setTextWrap(false);
   digitalWrite(pins::LCD_CS,HIGH);rfid.PCD_Init();delay(50);
   readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);readerOK=cafe::readerVersionPlausible(readerVersion);
+  readerOK=readerOK && probeReader();
   rfidDiagnostics.healthy=readerOK;if(!readerOK)rfidDiagnostics.error="not_initialized";
   setenv("TZ",cafe::TZ_BERLIN,1);tzset();session=randomHex();
   cfg.apPassword=randomHex().substring(0,12);cfg.adminPassword=randomHex().substring(0,12);

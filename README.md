@@ -1,8 +1,51 @@
-# Cafe R107 · Version 1.0.10
+# Cafe R107 · Version 1.0.11
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.11: RFID-Diagnose und gezielter Reader-Reset
+
+**Update von 1.0.10:** `git pull`, dann `pio run -t upload`.
+Nur Firmware; keine Website-Dateien und kein LittleFS-Upload erforderlich.
+TOF-XSHUT bleibt an IO4. Keine zusätzliche Verdrahtung nötig.
+
+Im Browser **`http://192.168.123.60/api/rfid/reinit`** aufrufen (Admin-Login).
+GET und POST werden unterstützt; POST benötigt wie bisher `X-Cafe-Request: 1`.
+Der Befehl setzt nur den RC522 über RST22 zurück und initialisiert ihn neu.
+ESP, Uhrzeit, TOF und Daten bleiben erhalten. Die Kartensperre und Buchungssperrzeit
+bleiben bestehen, damit eine weiterhin vorgehaltene Karte nicht nochmals bucht.
+Die Antwort enthält `ok` und die RFID-Diagnose; bei gescheiterter Registerprüfung
+HTTP 503. `ok:true` bestätigt die Registerprüfung, keine erfolgreiche Chip-Erkennung.
+
+Unter `/api/diagnostics` und `/api/status` zeigt RFID zusätzlich:
+
+- `antennaEnabled`, `antennaControlBits` (TX1/TX2), `antennaCheckAgeMs`:
+  Zustand bei der letzten Registerprüfung, kein Nachweis eines funktionierenden HF-Feldes.
+- `cardLatched`: aktuelle Kartensperre; Karte zum erneuten Buchen entfernen.
+- `polls`, `uidReads`, `lastUid`, `lastUidAgeMs`, `lastPollAgeMs`.
+- `lastWakeStatus` / `lastWakeStatusText`: letzter WUPA-Status;
+  `lastSelectStatus` / `lastSelectStatusText`: letzter Auswahlstatus,
+  der auch von einem früheren Poll stammen kann.
+- `consecutiveReadErrors`: aufeinanderfolgende auffällige Polls;
+  `verification: registers_only` macht die begrenzte Aussage von `healthy` deutlich.
+
+Vor dem ersten entsprechenden Vorgang sind Status/UID/Alter null.
+Der Minutencheck prüft jetzt neben VersionReg auch die Aktivierung beider
+Antennentreiber (TxControlReg). Drei Proben mit Mehrheitsentscheidung tolerieren
+einen einzelnen Ausreißer. Bei fehlerhaften Registern oder zehn aufeinanderfolgenden
+auffälligen Polls folgt ein Reader-Reset. Dazu zählen WUPA-Fehler außer normalen
+Timeouts/Kollisionen sowie fehlgeschlagene Kartenauswahl nach erfolgreichem WUPA.
+Jeder unauffällige Poll setzt den Fehlerzähler zurück. Eine bereits erkannte
+Fehlerserie bleibt als `readFaultPending` bis zur Wiederherstellung oder einer
+erfolgreichen UID-Lesung gespeichert. Erfolgreiche UID-Lesevorgänge
+bleiben unverändert auf eine Buchung pro neuem Kontakt begrenzt.
+
+**Grenze:** Stille HF-Ausfälle, die nur wie eine abwesende Karte erscheinen,
+können ohne Testkarte nicht automatisch erkannt werden. Längere Nichtbenutzung
+führt deshalb nie allein zu einem Reset. Kein regelmäßiger Selbsttest und kein
+automatischer ESP-Neustart. Bei erneutem Ausfall zunächst Diagnose sichern, dann
+`/api/rfid/reinit` aufrufen und anschließend den Chip erneut testen.
 
 ## Neu in 1.0.10: TOF-Hardware-Reset
 

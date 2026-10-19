@@ -12,6 +12,14 @@ public:
   bool begin() {bool hardware=pending_;pending_=true;return hardware;}
   bool measurement() {bool recovered=pending_;pending_=false;return recovered;}
 };
+// A normal no-card timeout or collision is not a reader fault.
+class ReaderFailures {
+  unsigned count_=0;
+public:
+  void observe(bool fault) {if(!fault)count_=0;else if(count_<10)++count_;}
+  unsigned count() const {return count_;}
+  bool repeated() const {return count_>=10;}
+};
 class HealthSchedule {
   uint32_t checkedAt_=0;
 public:

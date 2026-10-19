@@ -6,6 +6,12 @@
 #include <cstdlib>
 #include <iostream>
 int main(){
+ cafe::ReaderFailures failures;
+ for(unsigned i=0;i<9;++i) {failures.observe(true);assert(!failures.repeated());}
+ failures.observe(false);assert(failures.count()==0); // no-card resets the streak
+ for(unsigned i=0;i<10;++i)failures.observe(true);
+ assert(failures.repeated());failures.observe(false);assert(!failures.repeated());
+
  cafe::TofRecovery recovery;
  assert(!recovery.pending());assert(!recovery.measurement());
  assert(!recovery.begin()); // first attempt: software
