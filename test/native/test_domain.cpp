@@ -6,6 +6,15 @@
 #include <cstdlib>
 #include <iostream>
 int main(){
+ cafe::TofRecovery recovery;
+ assert(!recovery.pending());assert(!recovery.measurement());
+ assert(!recovery.begin()); // first attempt: software
+ assert(recovery.pending());assert(recovery.begin()); // retry: hardware
+ assert(recovery.begin()); // failed retries keep using hardware
+ assert(recovery.measurement()); // exactly one success for the first new sample
+ assert(!recovery.measurement());assert(!recovery.pending());
+ assert(!recovery.begin()); // a later incident starts with software again
+ assert(recovery.measurement());
  setenv("TZ",cafe::TZ_BERLIN,1);tzset();
  assert(!cafe::validTime(0));
  assert(cafe::weekKey(1609459200).empty()); // before supported range
@@ -139,3 +148,4 @@ int main(){
  assert(cafe::anchoredEpoch(0,5000,1760000000,65000)==1759999940);
  std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings, display cadence and backlight/presence passed.\n";
 }
+

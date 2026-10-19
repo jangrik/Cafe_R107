@@ -4,6 +4,14 @@
 namespace cafe {
 constexpr uint32_t HEALTH_INTERVAL_MS=60000;
 constexpr uint32_t TOF_STALL_MS=5000;
+// Escalate retries until a real measurement confirms recovery.
+class TofRecovery {
+  bool pending_=false;
+public:
+  bool pending() const {return pending_;}
+  bool begin() {bool hardware=pending_;pending_=true;return hardware;}
+  bool measurement() {bool recovered=pending_;pending_=false;return recovered;}
+};
 class HealthSchedule {
   uint32_t checkedAt_=0;
 public:
@@ -30,3 +38,4 @@ inline bool readerProbeOK(uint8_t expected,const uint8_t* values,unsigned count)
   return matches>=count/2+1;
 }
 }
+

@@ -1,8 +1,45 @@
-# Cafe R107 · Version 1.0.9
+# Cafe R107 · Version 1.0.10
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+## Neu in 1.0.10: TOF-Hardware-Reset
+
+**Verdrahtung:** VL53L0X **XSHUT → ESP32 GPIO4 (IO4)**, bei ausgeschalteter
+Versorgung anschließen. GPIO1 am Sensor bleibt frei. SDA16/SCL17 bleiben bestehen.
+GPIO4 wird ausschließlich LOW geschaltet oder als Eingang ohne Pull-up
+freigegeben, niemals aktiv HIGH. Der Pull-up auf dem vorhandenen Modul übernimmt
+beim Freigeben den Ruhepegel (am verwendeten Modul wurden 3,3 V gemessen).
+
+**Update von 1.0.9:** `git pull`, dann `pio run -t upload`.
+Nur Firmware hochladen; keine Website-Dateien und kein LittleFS-Image erforderlich.
+Die Displaydrehung aus 1.0.9 bleibt erhalten.
+
+Bei einem Fehler versucht der Minutencheck zuerst eine normale Neuinitialisierung.
+Wenn bis zum nächsten Check keine Messung angekommen ist, folgt ein Hardware-Reset:
+XSHUT 10 ms LOW, freigeben, 10 ms warten, Bibliothekszustand zurücksetzen und
+Sensor neu initialisieren. Weitere erfolglose Versuche bleiben bei Hardware-Reset.
+Nach einer empfangenen Messung startet ein späterer neuer Fehler wieder mit der
+Software-Stufe. Der ESP wird dabei nicht neu gestartet.
+
+In `/api/diagnostics` und `/api/tof` kommen für TOF hinzu:
+
+- `originalError`: erster beim Supervisor erkannter Fehler der letzten Störung;
+  bleibt auch nach Wiederherstellung sichtbar und wird bei einer neuen Störung ersetzt.
+- `initStage` / `initError`: aktueller Schritt / gescheiterter Schritt
+  (`address_probe`, `stop_continuous`, `sensor_init`, `timing_budget`, `start_continuous`).
+  `sensor_init` bezeichnet den Bibliotheksaufruf, keine interne Kalibrierungs-Unterstufe.
+- `initTimeout`: Timeout während der letzten Initialisierung;
+  `lastI2cStatus`: letzter Wire-Status (0 = erfolgreich).
+- `hardwareResets`, `recoveryPending`, `xshutPin` (4).
+
+`successfulReinitializations` zählt beim TOF jetzt erst nach einer neuen
+abgeschlossenen Messung, genau einmal je Wiederherstellungsversuch. Eine Messung
+außerhalb des nutzbaren Entfernungsbereichs bestätigt ebenfalls die Kommunikation,
+weckt aber nicht das Display. Alte Messzeitpunkte bleiben für `ageMs` erhalten.
+Ein Hardware-Reset kann nicht jeden elektrischen Defekt oder Versorgungsausfall beheben.
+Der Dauertest mit dem realen Modul steht noch aus.
 
 ## Neu in 1.0.9: Chip-Zeitpunkte und Sensorüberwachung , Display gedreht
 
@@ -63,7 +100,7 @@ Initialisierung beim Start. Keine unbedingten periodischen Neustarts:
 - Ungültige Entfernungen bei weiterhin abgeschlossenen Messungen (z. B. kein
   geeignetes Ziel) lösen **keine** Wiederherstellung aus. Kommunikationsfehler
   dürfen das Alter der letzten abgeschlossenen Messung nicht zurücksetzen.
-- Bei erfolglosem Versuch erfolgt der nächste erst beim folgenden Minutencheck.
+- Bei erfolglosem Versuch folgt beim nächsten Minutencheck die XSHUT-Stufe (ab 1.0.10).
   Eine erfolgreiche Neuinitialisierung gilt erst nach einer neuen abgeschlossenen
   Messung wieder als gesund. Eine alte Distanz wird nicht als neue ausgegeben.
 - **RFID:** VersionReg dreimal lesen und mit der beim Start erkannten Version
@@ -93,8 +130,8 @@ Funktion der Antenne. Fehler provozieren und am echten Gerät prüfen.
 - `automaticEspRestart:false`, `checkIntervalMs:60000`, `tofStallMs:5000`.
 
 Vor der ersten Prüfung/Wiederherstellung sind die zugehörigen Alterswerte null.
-Initialisierungserfolge zählen erfolgreiche Initialisierungsaufrufe; beim TOF
-bestätigt erst die folgende abgeschlossene Messung `healthy:true`.
+Beim RFID zählen erfolgreiche Initialisierungsaufrufe; beim TOF (ab 1.0.10)
+zählt erst die folgende abgeschlossene Messung als Erfolg und bestätigt `healthy:true`.
 Mögliche Fehler: `i2c_not_responding`, `measurement_stalled`, `not_initialized`,
 `i2c_measurement_error`, `version_register_mismatch`, `reinitialization_failed`.
 `waiting_for_measurement` ist ein vorübergehender Zustand nach Initialisierung.
@@ -312,7 +349,7 @@ GPIO-Nummern; keine Annahme über einen herausgeführten GPIO 21 oder 5.
 | ST7789 LCD | CLK / DIN | 18 / 23, gemeinsam mit RFID |
 | ST7789 LCD | CS / DC / RST | 26 / 27 / 33 |
 | Summer-Treiber | Basisansteuerung | GPIO 32 über 270 Ω |
-| VL53L0X | VIN / GND / SDA / SCL | 3V / G / 16 / 17 |
+| VL53L0X | VIN / GND / SDA / SCL / XSHUT | 3V / G / 16 / 17 / 4 |
 
 Summer: **PN2222A**, Emitter an GND, Kollektor an Summer −. Summer + über
 **10 Ω, mindestens ¼ W**, an 3V. Basis zusätzlich über 10 kΩ an GND.
@@ -464,3 +501,4 @@ Tests auf dem Rechner ersetzen keine Abnahme auf deinem ESP32.
 Von [Holger Lembke](https://github.com/holgerlembke/ESPFMfGK), eingefrorener
 Upstream-Commit `ac3b699c35705d34df06ed4a978fb5add4310463`.
 Lokale Anpassungen und Lizenz: [lib/ESPFMfGK/UPSTREAM.md](lib/ESPFMfGK/UPSTREAM.md).
+

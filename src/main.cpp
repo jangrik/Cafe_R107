@@ -24,7 +24,7 @@
 
 namespace pins {
 constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
-constexpr uint8_t LCD_BL=21, TOF_SDA=16, TOF_SCL=17;
+constexpr uint8_t LCD_BL=21, TOF_SDA=16, TOF_SCL=17, TOF_XSHUT=4;
 }
 constexpr uint16_t BG=0x1083, CREAM=0xFF18, GOLD=0xED68;
 constexpr uint16_t BUZZER_FREQUENCY=2500, BUZZER_MS=200;
@@ -49,6 +49,12 @@ SensorDiagnostics tofDiagnostics,rfidDiagnostics;
 cafe::HealthSchedule healthSchedule;
 uint8_t readerVersion=0;
 uint32_t tofInitAt=0;
+cafe::TofRecovery tofRecovery;
+String tofOriginalError,tofInitError,tofInitStage;
+bool tofFaultActive=false;
+uint32_t tofHardwareResets=0;
+uint8_t tofLastI2cStatus=0;
+bool tofInitTimeout=false;
 std::map<String,LastSeen> lastSeen;
 uint64_t lastSeenSequence=0;
 String lastSeenError;
@@ -85,44 +91,74 @@ void serviceBacklight() {
     digitalWrite(pins::LCD_BL,on?HIGH:LOW);
   }
 }
-void setupTof() {
+void setupTof(bool hardwareReset=false) {
   bool wasInitialized=tofOK;
-  tofOK=false;tofSampleValid=false;tofDistance=0;tofInitAt=millis();
+  tofOK=false;tofSampleValid=false;tofDistance=0;
+  tofInitError="";tofInitTimeout=false;tofInitStage="bus_begin";
   presenceGate=cafe::PresenceGate();
   Wire.end();
+  if(hardwareReset) {
+    // Never drive HIGH: release to the module's own XSHUT pull-up.
+    digitalWrite(pins::TOF_XSHUT,LOW);
+    pinMode(pins::TOF_XSHUT,OUTPUT);delay(10);
+    pinMode(pins::TOF_XSHUT,INPUT);delay(10);
+    ++tofHardwareResets;
+    tof=VL53L0X(); // Discard library state belonging to the previous sensor boot.
+  } else pinMode(pins::TOF_XSHUT,INPUT);
+  tofInitAt=millis();
   Wire.begin(pins::TOF_SDA,pins::TOF_SCL,100000);
   Wire.setTimeOut(10);
   tof.setBus(&Wire);tof.setTimeout(200);
-  tof.timeoutOccurred(); // Discard a timeout from an earlier failed attempt.
-  if(wasInitialized) {
-    Wire.beginTransmission(0x29);
-    if(Wire.endTransmission()==0)tof.stopContinuous();
-  }
-  tofOK=tof.init();
-  if(tofOK) {
-    tofOK=tof.setMeasurementTimingBudget(33000);
-    if(tofOK) {tof.startContinuous(100);tofOK=tof.last_status==0;}
-  }
   tof.timeoutOccurred();
+  auto failed=[](const char* stage) {
+    tofInitStage=stage;tofInitError=stage;
+    tofLastI2cStatus=tof.last_status;tofInitTimeout=tof.timeoutOccurred();
+    tofDiagnostics.healthy=false;tofDiagnostics.error="reinitialization_failed";
+    Serial.println("TOF init failed: "+tofInitError);
+  };
+  tofInitStage="address_probe";
+  Wire.beginTransmission(0x29);tofLastI2cStatus=Wire.endTransmission();
+  if(tofLastI2cStatus!=0) {tofInitError="address_probe";return;}
+  if(wasInitialized && !hardwareReset) {
+    tof.stopContinuous();
+    if(tof.last_status!=0) {failed("stop_continuous");return;}
+  }
+  tofInitStage="sensor_init";
+  if(!tof.init()) {failed("sensor_init");return;}
+  tofInitStage="timing_budget";
+  if(!tof.setMeasurementTimingBudget(33000) || tof.last_status!=0) {
+    failed("timing_budget");return;
+  }
+  tofInitStage="start_continuous";
+  tof.startContinuous(100);
+  bool timedOut=tof.timeoutOccurred();
+  if(tof.last_status!=0 || timedOut) {
+    failed("start_continuous");tofInitTimeout=tofInitTimeout || timedOut;return;
+  }
+  tofOK=true;tofLastI2cStatus=0;tofInitStage="waiting_for_measurement";
   tof.setTimeout(20);
-  // Preserve the real last measurement timestamp across recovery attempts.
-  Serial.println(tofOK ? "VL53L0X bereit (SDA16/SCL17, Naehe 80 cm)" :
-    "VL53L0X fehlt/antwortet nicht. Aufwecken per RFID bleibt aktiv.");
+  // Preserve lastTofResult for API age; recovery uses its own first-sample state.
+  tofDiagnostics.healthy=false;tofDiagnostics.error="waiting_for_measurement";
+  Serial.println("VL53L0X bereit (SDA16/SCL17, XSHUT4, Naehe 80 cm)");
 }
 void serviceTof() {
   uint32_t now=millis();
   if(!tofOK || uint32_t(now-lastTofPoll)<100)return;
   lastTofPoll=now;
   uint8_t ready=tof.readReg(VL53L0X::RESULT_INTERRUPT_STATUS);
+  tofLastI2cStatus=tof.last_status;
   bool valid=false;uint16_t mm=0;
   if(tof.last_status==0 && (ready&0x07)) {
     // Read only a completed continuous measurement, never start/wait for a shot.
     mm=tof.readRangeContinuousMillimeters();
-    bool transportOK=!tof.timeoutOccurred() && tof.last_status==0;
+    tofLastI2cStatus=tof.last_status;
+    bool transportOK=!tof.timeoutOccurred() && tofLastI2cStatus==0;
     valid=transportOK && mm>=20 && mm<=2000;
     tofDistance=valid?mm:0;tofSampleValid=valid;
     if(transportOK) {
       lastTofResult=now;tofHasSample=true;
+      if(tofRecovery.measurement())++tofDiagnostics.successes;
+      tofFaultActive=false;tofInitStage="running";
       tofDiagnostics.healthy=true;tofDiagnostics.error="";
     } else {
       tofDiagnostics.healthy=false;tofDiagnostics.error="i2c_measurement_error";
@@ -144,16 +180,20 @@ void beginRecovery(SensorDiagnostics& d,const String& reason) {
 void serviceDeviceHealth() {
   uint32_t now=millis();if(!healthSchedule.takeIfDue(now))return;
   ++tofDiagnostics.checks;tofDiagnostics.checkedAt=now;
-  Wire.beginTransmission(0x29);bool ack=Wire.endTransmission()==0;
-  String reason=cafe::tofHealthError(tofOK,ack,tofHasSample,
+  Wire.beginTransmission(0x29);tofLastI2cStatus=Wire.endTransmission();
+  bool ack=tofLastI2cStatus==0;
+  String reason=cafe::tofHealthError(tofOK,ack,tofHasSample && !tofRecovery.pending(),
       uint32_t(now-lastTofResult),uint32_t(now-tofInitAt));
   if(reason.length()) {
+    if(!tofFaultActive) {tofOriginalError=reason;tofFaultActive=true;}
     beginRecovery(tofDiagnostics,reason);
-    Serial.println("TOF recovery: "+reason);
-    setupTof();
-    if(tofOK) {++tofDiagnostics.successes;tofDiagnostics.error="waiting_for_measurement";}
-    else tofDiagnostics.error="reinitialization_failed";
-  } else {tofDiagnostics.healthy=true;tofDiagnostics.error="";}
+    bool hardwareReset=tofRecovery.begin();
+    Serial.println("TOF recovery: "+reason+(hardwareReset?" (XSHUT)":" (software)"));
+    setupTof(hardwareReset);
+    if(!tofOK)tofDiagnostics.error="reinitialization_failed";
+  } else if(!tofRecovery.pending() && tofHasSample) {
+    tofDiagnostics.healthy=true;tofDiagnostics.error="";
+  }
 
   ++rfidDiagnostics.checks;rfidDiagnostics.checkedAt=millis();
   digitalWrite(pins::LCD_CS,HIGH);
@@ -591,7 +631,11 @@ void sensorDiagnosticJson(JsonObject o,const SensorDiagnostics& diag) {
 }
 void tofDiagnosticJson(JsonObject o) {
   sensorDiagnosticJson(o,tofDiagnostics);
-  String stalled=cafe::tofHealthError(tofOK,true,tofHasSample,
+  o["originalError"]=tofOriginalError;o["initError"]=tofInitError;
+  o["initStage"]=tofInitStage;o["initTimeout"]=tofInitTimeout;
+  o["lastI2cStatus"]=tofLastI2cStatus;o["hardwareResets"]=tofHardwareResets;
+  o["recoveryPending"]=tofRecovery.pending();o["xshutPin"]=pins::TOF_XSHUT;
+  String stalled=cafe::tofHealthError(tofOK,true,tofHasSample && !tofRecovery.pending(),
       uint32_t(millis()-lastTofResult),uint32_t(millis()-tofInitAt));
   if(stalled.length()) {
     o["healthy"]=false;
@@ -877,3 +921,4 @@ void loop() {
   if(restartRequest.due(millis())) {toneHz(0);ESP.restart();}
   delay(1);
 }
+
