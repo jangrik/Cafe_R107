@@ -86,17 +86,24 @@ void serviceBacklight() {
   }
 }
 void setupTof() {
+  bool wasInitialized=tofOK;
   tofOK=false;tofSampleValid=false;tofDistance=0;tofInitAt=millis();
   presenceGate=cafe::PresenceGate();
   Wire.end();
   Wire.begin(pins::TOF_SDA,pins::TOF_SCL,100000);
   Wire.setTimeOut(10);
   tof.setBus(&Wire);tof.setTimeout(200);
+  tof.timeoutOccurred(); // Discard a timeout from an earlier failed attempt.
+  if(wasInitialized) {
+    Wire.beginTransmission(0x29);
+    if(Wire.endTransmission()==0)tof.stopContinuous();
+  }
   tofOK=tof.init();
   if(tofOK) {
     tofOK=tof.setMeasurementTimingBudget(33000);
     if(tofOK) {tof.startContinuous(100);tofOK=tof.last_status==0;}
   }
+  tof.timeoutOccurred();
   tof.setTimeout(20);
   // Preserve the real last measurement timestamp across recovery attempts.
   Serial.println(tofOK ? "VL53L0X bereit (SDA16/SCL17, Naehe 80 cm)" :
