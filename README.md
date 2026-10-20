@@ -1,8 +1,264 @@
-# Cafe R107 · Version 1.0.11
+# Cafe R107 · Version 1.0.12
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
 Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
+
+
+**Direkt zu:** [OTA-Update](#firmware-per-ota-aktualisieren) ·
+[HTTP-API](#vollständige-http-api-stand-1012) ·
+[Pinbelegung](#hardware--funktionierende-pinbelegung) ·
+[Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.0.12: OTA über WLAN
+
+ArduinoOTA ist aktiv: Hostname **CAFE-R107**, Standardport **3232**.
+OTA ist ein eigener Upload-Dienst, kein HTTP-Endpunkt und kein Upload über
+den Dateimanager.
+
+### Firmware per OTA aktualisieren
+
+Voraussetzung: Auf dem ESP läuft bereits 1.0.12 oder eine andere Firmware mit
+ArduinoOTA. Die erstmalige Installation erfolgt über USB. Rechner und ESP
+müssen sich über das lokale Netzwerk erreichen können.
+
+1. Änderungen mit **git pull** herunterladen.
+2. In **platformio.ini** die Umgebung **cafe_r107_ota** prüfen:
+   upload_protocol = espota; upload_port = 192.168.123.60.
+   Die Adresse gegebenenfalls durch die aktuelle Client-IP ersetzen.
+3. Das Upload-Kennwort in **upload_flags = --auth=…** muss zum mit
+   **ArduinoOTA.setPassword(...)** in src/main.cpp eingestellten Kennwort passen.
+   Es ist unabhängig vom HTTP-Admin- und AP-Kennwort.
+4. Firmware über WLAN bauen und hochladen:
+
+~~~sh
+pio run -e cafe_r107_ota -t upload
+~~~
+
+Alternativ unter **Project Tasks → cafe_r107_ota → General → Upload**.
+Nach erfolgreichem Upload startet der ESP automatisch neu. Die Version
+anschließend unter **/api/status** kontrollieren.
+
+Die Standardumgebung **cafe_r107** bleibt für USB:
+
+~~~sh
+pio run -e cafe_r107 -t upload
+~~~
+
+Bei direkter Verbindung zum ESP-AP kann upload_port auf **192.168.4.1**
+gesetzt werden. Bei expliziter IP ist keine mDNS-Namensauflösung nötig.
+Bei Problemen IP, Netzwerkverbindung und lokale Firewall prüfen; USB bleibt
+als Alternative verfügbar.
+
+**Firmware-OTA erhält LittleFS bei unveränderter Partitionstabelle.**
+Kein uploadfs für ein gewöhnliches Update verwenden. Webdateien bei Bedarf
+einzeln über den Dateimanager auf Port 8080 ersetzen. Nach dem Neustart muss
+die Uhrzeit erneut per NTP oder Browser gesetzt werden.
+Diese Dokumentationsänderung behält die Firmwareversion **1.0.12** bei.
+
+## Vollständige HTTP-API (Stand 1.0.12)
+
+### Adresse und Anmeldung
+
+Alle folgenden Pfade gehören zum Webserver auf **Port 80**.
+Basisadresse beispielsweise **http://192.168.123.60**, am AP **http://192.168.4.1**.
+
+- Alle Endpunkte benötigen HTTP Basic Auth: Benutzer **admin**, Admin-Kennwort
+  aus der Gerätekonfiguration. Im Browser erscheint die Login-Abfrage.
+- **Jeder POST** benötigt zusätzlich **X-Cafe-Request: 1**.
+  GET benötigt diesen Header nicht.
+- POST mit Nutzdaten: JSON-Objekt, maximal **4096 Bytes**.
+  Content-Type: application/json verwenden.
+- Antworten sind JSON mit Cache-Control: no-store, außer beim CSV-Export.
+- Zeitpunkte sind Unix-Sekunden (UTC), Kalenderauswertungen verwenden Berlin
+  einschließlich Sommerzeit. Zeitwert 0 bedeutet unbekannt.
+  Alterswerte und uptime sind Millisekunden.
+- GET-Aliasse für Neustart, Display und RFID-Reinit führen Aktionen aus.
+  Diese Aktionspfade nicht regelmäßig pollen.
+
+### Alle Endpunkte
+
+| Methode | Pfad | Parameter / JSON-Body | Funktion / Antwort |
+|---|---|---|---|
+| GET | /api/status | keine | Geräte-, Netzwerk-, Zeit-, Speicher- und Sensorstatus |
+| GET | /api/registry | keine | people, cards, pending, lastSeen |
+| GET | /api/report | Query optional: week=YYYY-Www, month=YYYY-MM | Summen insgesamt, heute, gewählte Woche und Monat, pro Person |
+| GET | /api/history | Query optional: before=Buchungs-ID | Maximal 50 Bezüge, neueste zuerst; rows und more |
+| GET | /api/export.csv | keine | CSV aller Bezüge einschließlich Stornos |
+| GET | /api/display | keine | on und mode |
+| POST | /api/display | {"mode":"on"}; alternativ off oder auto | Umschalten; ok, on, mode |
+| GET / POST | /api/display/on | kein Body nötig | Dauerhaft einschalten; ok, on, mode |
+| GET / POST | /api/display/off | kein Body nötig | Sofort aus wie nach Ablauf der Fristen; Modus auto, RFID/TOF können wieder wecken |
+| GET / POST | /api/display/auto | kein Body nötig | Automatik aktivieren, Fristen nicht neu starten |
+| GET | /api/tof | keine | Entfernung, Gültigkeit, Alter, Anwesenheit, diagnostics |
+| GET | /api/diagnostics | keine | tof, rfid und Überwachungsparameter |
+| GET / POST | /api/rfid/reinit | kein Body nötig | Nur RC522 zurücksetzen; ok und rfid; HTTP 200 oder 503 |
+| GET / POST | /api/restart | kein Body nötig | ESP-Neustart planen; HTTP 202 mit ok, restarting, delayMs |
+| POST | /api/person | {"name":"Beispielperson"}; zum Umbenennen zusätzlich "id":"Person-ID" | Anlegen/Umbenennen; ok und id |
+| POST | /api/assign | {"uid":"UID","person":"Person-ID"} | Chip zuordnen/umhängen; ok |
+| POST | /api/forget | {"uid":"UID"} | Zuordnung und Eintrag als neuer Chip entfernen; ok |
+| POST | /api/cancel | {"id":123} | Bezug mit dieser Buchungs-ID stornieren; ok |
+| POST | /api/time | {"epoch":1792490400} | Uhrzeit und gegebenenfalls Zeitanker setzen; ok |
+| POST | /api/config | Teilmenge von ssid, wifiPassword, apPassword, adminPassword | Speichern; ok und restartRequired:true |
+
+Kein API-Befehl zum künstlichen Buchen, Löschen einer Person oder manuellen
+TOF-Reset: Buchungen entstehen durch Chipkontakt; die TOF-Wiederherstellung
+übernimmt die Sensorüberwachung.
+
+### Status und Diagnose
+
+**/api/status** liefert:
+
+| Bereich | Felder |
+|---|---|
+| Version / Laufzeit | version, session, uptime, epoch |
+| Netzwerk | apSsid, apIP, staConnected, staIP, ssid, filemanagerPort |
+| Beleuchtung / Näherung | backlightOn, backlightMode, tofOK, distanceMm, presence |
+| Daten / Speicher | readerOK, storageError, journalOK, fsUsed, fsTotal, pendingCount, lastSeenRevision, lastSeenError |
+| Diagnose | tofDiagnostics, rfidDiagnostics |
+
+fsUsed und fsTotal sind Bytes. distanceMm im Status ist bei fehlender gültiger
+Entfernung **0**; für eindeutige Gültigkeit /api/tof verwenden.
+
+**/api/tof** liefert available, valid, distanceMm, ageMs, presence, diagnostics.
+available bedeutet erfolgreiche Initialisierung, auch nach Wiederherstellung.
+valid erfordert 20–2000 mm und eine höchstens 500 ms alte gültige Messung.
+Andernfalls ist distanceMm **null**. ageMs ist **null**, solange noch keine
+abgeschlossene Messung vorliegt. Auch ungültige Entfernungen aktualisieren
+das Alter: healthy:true und valid:false können gleichzeitig korrekt sein.
+
+**/api/diagnostics** liefert tof, rfid, lastSeenError,
+automaticEspRestart:false, checkIntervalMs:60000, tofStallMs:5000.
+
+| Objekt | Felder |
+|---|---|
+| Beide Sensoren | healthy, error, lastError, checks, recoveryAttempts, successfulReinitializations, lastRecoveryReason, lastCheckAgeMs, lastRecoveryAgeMs |
+| TOF zusätzlich | originalError, initError, initStage, initTimeout, lastI2cStatus, hardwareResets, recoveryPending, xshutPin |
+| RFID zusätzlich | versionRegister, antennaEnabled, antennaControlBits, antennaCheckAgeMs, verification, cardLatched, polls, uidReads, consecutiveReadErrors, readFaultPending, lastWakeStatus, lastWakeStatusText, lastPollAgeMs, lastSelectStatus, lastSelectStatusText, lastUid, lastUidAgeMs |
+
+Interpretation siehe auch Versionsabschnitte 1.0.10/1.0.11.
+Zähler gelten seit dem letzten ESP-Start. Historische Fehler bleiben nach
+Erholung sichtbar. verification:"registers_only" beim RFID bestätigt keine
+vollständige HF-Funktion. Das gilt ebenfalls für ok:true nach RFID-Reinit:
+Es bestätigt die Registerprüfung; anschließend den Chip erneut testen.
+Vor der ersten Prüfung/Wiederherstellung sind die entsprechenden Alterswerte null;
+vor dem ersten Poll/Select/UID-Empfang die zugehörigen Status-/UID-Werte und Alter.
+lastSelectStatus kann aus einem früheren Poll stammen.
+
+### Personen, Chips und Auswertung
+
+**/api/registry** liefert people (Objekte mit id, name), cards (uid, person),
+pending (Array neuer UIDs) und lastSeen (UID als Schlüssel, Unix-Zeit als Wert).
+lastSeen-Wert 0 bedeutet Kontakt ohne zuordenbare Uhrzeit; ein fehlender
+Schlüssel bedeutet keinen gespeicherten Kontakt.
+
+UIDs exakt aus der Antwort übernehmen. **/api/assign** akzeptiert nur Chips,
+die schon zugeordnet oder in pending vorhanden sind. Maximal 50 Personen,
+100 zugeordnete Chips. Namen werden getrimmt, dürfen keine Steuerzeichen
+enthalten und sind auf 48 UTF-8-Bytes begrenzt.
+**/api/forget** löscht weder historische Bezüge noch separat gespeicherte
+Kontaktzeitpunkte. Erneutes Vorhalten kann den Chip wieder als unbekannt erfassen.
+
+**/api/report** verwendet ohne Query die aktuelle ISO-Woche und den aktuellen
+Monat; ohne Uhrzeit leere Periodenschlüssel. Antwort: week, month, totals,
+people, weeks, months. totals und Personeneinträge enthalten total, today,
+week, month, undated; Personen zusätzlich id und name.
+weeks und months listen Perioden mit nicht stornierten datierten Bezügen,
+neueste zuerst. Undatierte Bezüge zählen zur Gesamtsumme, nicht zu Kalenderperioden.
+Query-Perioden im Tabellenformat angeben; der Server validiert das Format
+nicht gesondert. Ein nicht passender Schlüssel ergibt dafür null Bezüge.
+
+**/api/history** liefert rows mit id, person, name, epoch, cancelled und more.
+Nächste Seite: before gleich der kleinsten ID der aktuellen Seite setzen;
+die Grenze ist exklusiv. more:true bedeutet weitere ältere Bezüge.
+Stornos bleiben im Verlauf. Wiederholtes Stornieren derselben ID ist
+erfolgreich, ohne einen weiteren Stornoeintrag zu erzeugen.
+
+**/api/export.csv** liefert UTF-8 mit BOM und Semikolon-Trennung:
+id;person_id;name;zeit_berlin;epoch;storniert.
+Downloadname: Cafe_R107.csv. Namen entsprechen dem aktuellen Personennamen;
+undatierte Zeitfelder bleiben leer. Stornierte Bezüge bleiben enthalten.
+
+### Uhrzeit, Konfiguration und Aktionen
+
+**/api/time** erwartet Unix-Sekunden im Bereich 2024–2037.
+Die Uhr wird sofort gesetzt; ein Zeitanker kann undatierte Bezüge derselben
+Startsitzung datieren. Keine batteriegepufferte Echtzeituhr.
+Dieser Endpunkt benötigt schreibbereiten Speicher. Falls das Speichern des
+Zeitankers scheitert, kann HTTP 200 mit ok:false zurückkommen.
+
+Bei **/api/config** bleiben nicht übergebene Felder unverändert.
+ssid maximal 32 Bytes, wifiPassword maximal 63 Bytes.
+Ein leeres wifiPassword **löscht** das Client-WLAN-Kennwort.
+Leere apPassword/adminPassword behalten dagegen ihren bisherigen Wert;
+nichtleere Kennwörter müssen 8–63 Bytes lang sein.
+Eine leere ssid beendet Client-Verbindungsversuche nach dem nächsten Neustart.
+Der Aufruf speichert nur; Netzwerk-/Zugangsänderungen gelten erst nach
+Neustart, den der Endpunkt nicht selbst auslöst.
+
+**/api/display/on** erzwingt Beleuchtung bis Moduswechsel/Neustart.
+**off** löscht beide Aktivitätsfristen und aktiviert auto; neuer RFID-Kontakt
+oder erneute TOF-Näherung können sofort wieder einschalten.
+**auto** hebt den erzwungenen Modus auf, verlängert aber keine Frist.
+Die Modi werden nicht gespeichert; nach Neustart gilt auto.
+Gemeint ist die Hintergrundbeleuchtung an GPIO21; Buchung und Sensorik laufen weiter.
+
+**/api/rfid/reinit** setzt nur den Reader über RST22 zurück.
+Kartensperre und Buchungssperrzeit bleiben erhalten; ESP, Uhrzeit und TOF laufen weiter.
+Antwort: ok und rfid; bei gescheiterter Registerprüfung HTTP 503.
+
+**/api/restart** antwortet zuerst mit HTTP 202:
+{"ok":true,"restarting":true,"delayMs":500}.
+Der Neustart erfolgt nach etwa 500 ms in der Hauptschleife.
+Wiederholte Anforderungen verschieben einen geplanten Neustart nicht nach hinten.
+Uhrzeit muss erneut synchronisiert werden; Konfiguration und Buchungen bleiben.
+
+### Fehlerantworten
+
+| HTTP-Code | Bedeutung |
+|---|---|
+| 200 | Normaler erfolgreicher Aufruf; gegebenenfalls ok zusätzlich prüfen |
+| 202 | ESP-Neustart angenommen |
+| 400 | Ungültiges JSON, Parameter, Name, Uhrzeit oder Konfiguration |
+| 401 | HTTP-Basic-Anmeldung fehlt/ist falsch; Login-Abfrage |
+| 403 | POST ohne korrekten X-Cafe-Request: 1 |
+| 404 | Pfad, Person, Buchung oder zuvor erfasster Chip nicht gefunden |
+| 409 | Personen-/Chiplimit erreicht |
+| 503 | Speicher/Journal nicht bereit oder RFID-Reinit gescheitert |
+| 507 | Schreiben fehlgeschlagen |
+
+Anwendungsfehler sind üblicherweise JSON {"error":"Beschreibung"}.
+RFID-Reinit liefert bei HTTP 503 stattdessen ok:false und das rfid-Objekt.
+Die Authentifizierungsantwort kann vom JSON-Format abweichen.
+
+### Aufrufbeispiele
+
+Im Browser nach Admin-Anmeldung:
+
+- http://192.168.123.60/api/status
+- http://192.168.123.60/api/report?week=2026-W43&month=2026-10
+- http://192.168.123.60/api/display/off
+- http://192.168.123.60/api/rfid/reinit
+
+Windows/PowerShell: curl.exe -u admin fragt das Admin-Kennwort ab.
+
+~~~powershell
+curl.exe -u admin http://192.168.123.60/api/diagnostics
+curl.exe -u admin "http://192.168.123.60/api/history?before=123"
+curl.exe -u admin -X POST -H "X-Cafe-Request: 1" http://192.168.123.60/api/display/off
+curl.exe -u admin -X POST -H "X-Cafe-Request: 1" -H "Content-Type: application/json" --data-binary "@person.json" http://192.168.123.60/api/person
+~~~
+
+Die lokale Datei person.json enthält beispielsweise {"name":"Beispielperson"}.
+Unter Linux/macOS curl statt curl.exe verwenden.
+
+### Dateimanager und OTA
+
+ESPFMfGK läuft separat auf **Port 8080**, mit demselben HTTP-Admin-Login.
+Seine Dateiverwaltungsrouten gehören nicht zur obigen Cafe-R107-API.
+Oberfläche: http://192.168.123.60:8080/ oder http://192.168.4.1:8080/.
+ArduinoOTA auf Port 3232 verwendet sein eigenes Upload-Kennwort und PlatformIO,
+keinen Pfad unter /api/.
 
 ## Neu in 1.0.11: RFID-Diagnose und gezielter Reader-Reset
 
@@ -263,7 +519,7 @@ Beispielantwort TOF:
 {"available":true,"valid":true,"distanceMm":432,"ageMs":34,"presence":true}
 ```
 
-- `available`: Sensor wurde beim Start erfolgreich initialisiert.
+- `available`: Sensor ist erfolgreich initialisiert, beim Start oder nach Wiederherstellung.
 - `valid`: letzte Messung gültig und höchstens 500 ms alt.
 - `distanceMm`: Entfernung in **Millimetern**, bei ungültiger/veralteter Messung
   oder fehlendem Sensor **null** (kein erfundener Null-Abstand).
@@ -302,7 +558,8 @@ zur bisherigen festen 3V-Verbindung anschließen.
 | GND | G |
 | SDA | 16 |
 | SCL | 17 |
-| XSHUT / GPIO1 | unbeschaltet |
+| XSHUT | GPIO 4 (seit 1.0.10) |
+| GPIO1 | unbeschaltet |
 
 Nur ein VL53L0X wird verwendet; I²C-Adresse 0x29. Die Pinwahl lässt SPI und
 RFID unverändert. Das Modul muss für 3,3 V Versorgung/Logik geeignet sein;
@@ -471,9 +728,8 @@ Ein separater ESP-Timer begrenzt jeden Ton auch bei beschäftigtem Webserver.
 
 ## LittleFS, Sicherung und Updates
 
-4 MB Flash: zwei App-Partitionen zu je 1,5 MiB, LittleFS **960 KiB**. OTA wird
-in dieser Version nicht angeboten; die App-Partitionen lassen eine spätere
-Erweiterung zu. **Firmware-Upload** lässt bei unveränderter Partitionstabelle
+4 MB Flash: zwei App-Partitionen zu je 1,5 MiB, LittleFS **960 KiB**.
+Seit 1.0.12 sind Firmware-Updates über ArduinoOTA möglich (siehe oben). **Firmware-Upload** lässt bei unveränderter Partitionstabelle
 LittleFS bestehen; **Filesystem-Upload ersetzt das komplette Dateisystem**.
 
 | Datei auf dem ESP | Inhalt |
