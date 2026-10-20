@@ -21,6 +21,7 @@
 #include "DisplayLogic.h"
 #include "Backlight.h"
 #include "HealthLogic.h"
+#include <ArduinoOTA.h>
 
 namespace pins {
 constexpr uint8_t RFID_CS=25, RFID_RST=22, LCD_CS=26, LCD_DC=27, LCD_RST=33, BUZZER=32;
@@ -947,7 +948,7 @@ void setup() {
   if(buzzerReady){ledcAttachPin(pins::BUZZER,BUZZER_CHANNEL);toneHz(0);}
   pinMode(pins::RFID_CS,OUTPUT);digitalWrite(pins::RFID_CS,HIGH);
   pinMode(pins::LCD_CS,OUTPUT);digitalWrite(pins::LCD_CS,HIGH);
-  SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(2);lcd.setTextWrap(false);
+  SPI.begin(18,19,23);lcd.init(240,240,SPI_MODE0);lcd.setSPISpeed(20000000);lcd.setRotation(0);lcd.setTextWrap(false);
   digitalWrite(pins::LCD_CS,HIGH);rfid.PCD_Init();delay(50);
   readerVersion=rfid.PCD_ReadRegister(MFRC522::VersionReg);readerOK=cafe::readerVersionPlausible(readerVersion);
   readerOK=readerOK && probeReader();
@@ -973,9 +974,15 @@ void setup() {
   center("AP: "+cfg.apPassword,125,2,GOLD);center("Login: admin",150,2,CREAM);
   center(cfg.adminPassword,170,2,GOLD);center(WiFi.softAPIP().toString(),210,2,CREAM);
   displayAt=millis();rankingCycle.reset(displayAt);beep(1,2000,80);
+
+// **************************************************************  Setup OTA      Over the Air Flashing
+  ArduinoOTA.setHostname("CAFE-R107");
+  ArduinoOTA.setPassword("Kether");
+  ArduinoOTA.begin();
+
 }
 void loop() {
-  serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();serviceDeviceHealth();
+  ArduinoOTA.handle(); serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();serviceDeviceHealth();
   pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
   serviceDisplay();
   // File operations and the HTTP response have completed before restarting.
