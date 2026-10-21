@@ -8,3 +8,7 @@ journal.ndjson
 backups/
 secrets.h
 
+# Local OTA credentials (never commit)
+/ota.local.json
+/ota.local.json.*
+

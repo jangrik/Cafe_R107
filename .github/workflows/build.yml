@@ -17,10 +17,17 @@ jobs:
         run: g++ -std=c++11 -Wall -Wextra -Werror -Iinclude test/native/test_domain.cpp -o /tmp/test-domain && /tmp/test-domain
       - name: Web tests
         run: npm test && npm run check
+      - name: Local OTA configuration tests
+        run: python -m unittest discover -s test -p test_ota.py
       - name: Install PlatformIO
         run: pip install platformio==6.1.18
       - name: Build firmware
         run: pio run
+      - name: Build OTA with local test configuration
+        run: |
+          python -c 'import json; from pathlib import Path; Path("ota.local.json").write_text(json.dumps({"password":"ci-only-test-password"}))'
+          pio run -e cafe_r107_ota
+          rm ota.local.json
       - name: Build LittleFS image
         run: pio run -t buildfs
       - uses: actions/upload-artifact@v4
@@ -29,3 +36,4 @@ jobs:
           path: |
             .pio/build/cafe_r107/firmware.bin
             .pio/build/cafe_r107/littlefs.bin
+

@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.0.14
+# Cafe R107 · Version 1.0.15
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,78 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.0.15: TOP-Seiten per Hand und lokale OTA-Datei
+
+### TOP 5 durch Hand vor dem TOF
+
+Die periodische 60-Sekunden-Anzeige entfällt vollständig. Bei einer frischen,
+gültigen Distanz **unter 120 mm** erscheinen die TOP 5 sofort, solange keine
+Startanzeige oder Buchungsbestätigung Vorrang hat. Reihenfolge:
+**Heute → Dieser Monat → Insgesamt → Heute …**, jeweils **10 Sekunden**.
+Die Hand hält die Hintergrundbeleuchtung aktiv. Nach Entfernen der Hand,
+einer ungültigen Messung oder einem mehr als 500 ms alten Messwert erscheint
+wieder die normale Anzeige. Bei erneutem Vorhalten beginnt der Zyklus mit Heute.
+Die gültige Sensor-Untergrenze bleibt 20 mm; genau 120 mm startet keine Rangliste.
+Die normale Näherungserkennung bei 80 cm bleibt für das Aufwecken bestehen.
+Bei fehlender Uhrzeit zeigen Heute/Monat den bisherigen Hinweis; Insgesamt
+enthält auch undatierte Bezüge. Eine RFID-Buchung behält ihre Bestätigung und
+wird nicht von der Rangliste verdeckt.
+
+### Eigenes OTA-Kennwort in einer lokalen Datei
+
+Im Projektordner **ota.local.example.json** nach **ota.local.json** kopieren
+und den Platzhalter ersetzen:
+
+```json
+{
+  "password": "HIER_DEIN_EIGENES_OTA_KENNWORT_EINTRAGEN"
+}
+```
+
+**ota.local.json** und deren lokale Sicherungskopien **ota.local.json.*** sind
+in .gitignore ausgeschlossen. Nur die kennwortfreie Vorlage gehört ins Repository.
+Die echte Datei liegt im Projektstamm, nicht in data/ und nicht im LittleFS.
+Die Build-Skripte lesen sie automatisch für USB- und OTA-Builds. In die Firmware
+wird der von ArduinoOTA benötigte MD5-Kennworthash eingebunden; das lokale Kennwort
+wird nicht als Klartext-Konstante in den Quellcode geschrieben. Das OTA-Kennwort
+ist damit unabhängig vom Admin-Kennwort der Website.
+
+Upload aus PlatformIO wie gewohnt, ohne vorherige Umgebungsvariable:
+
+```sh
+pio run -e cafe_r107_ota -t upload
+```
+
+Wichtig beim ersten Wechsel von 1.0.14 auf das neue eigene Kennwort:
+Die **laufende** Firmware erwartet noch ihr bisheriges Kennwort (in 1.0.14 das
+Geräte-Admin-Kennwort). Dafür kann die lokale Datei vorübergehend so aussehen:
+
+```json
+{
+  "password": "NEUES_OTA_KENNWORT",
+  "uploadPassword": "BISHERIGES_OTA_KENNWORT_DER_LAUFENDEN_FIRMWARE"
+}
+```
+
+password bestimmt die neu gebaute Firmware, uploadPassword authentifiziert nur
+den aktuellen Upload. Nach erfolgreichem Wechsel uploadPassword entfernen,
+damit weitere Uploads automatisch password verwenden. Alternativ das erste
+Update per USB durchführen; dafür wird kein bisheriges OTA-Kennwort gebraucht.
+
+Fehlt die lokale Datei, bleibt der bisherige Fallback erhalten: Die Firmware
+verwendet das Geräte-Admin-Kennwort; ein OTA-Upload benötigt dann weiterhin
+CAFE_OTA_PASSWORD. Das ermöglicht auch GitHub-Builds ohne private Datei.
+Eine vorhandene, aber fehlerhafte lokale Datei bricht den Build mit einer
+Fehlermeldung ab, statt unbemerkt ein anderes Kennwort zu verwenden.
+Lokale Dateiinhalte und Kennwörter werden durch die Konfigurationsskripte nicht geloggt.
+
+**Update von 1.0.14:** git pull, lokale OTA-Datei wie oben anlegen, Firmware
+hochladen (USB oder OTA mit Übergangskennwort). **Keine Website-Dateien** und
+kein LittleFS-Upload nötig. Vorhandene Konfiguration und Bezüge bleiben bestehen.
+GitHub Actions prüft zusätzlich die lokale Dateiverarbeitung und baut eine
+OTA-Firmware mit einer ausdrücklich nur für CI bestimmten Testkonfiguration.
+Der Test am echten TOF und der OTA-Upload am Gerät stehen noch aus.
 
 ## Neu in 1.0.14: AP-only sofort und dauerhaft umschalten
 

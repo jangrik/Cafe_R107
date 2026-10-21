@@ -79,21 +79,19 @@ int main(){
         top[2].id=="a2" && top[3].id=="b" && top[4].id=="d");
  assert(cafe::topFive({{"zero","Nobody",0}}).empty());
  assert(cafe::topFive({{"one","One",1}}).size()==1);
+ assert(!cafe::rankingHand(true,120));assert(cafe::rankingHand(true,119));
+ assert(!cafe::rankingHand(false,50));assert(!cafe::rankingHand(true,0));
  cafe::RankingCycle cycle;cycle.reset(1000);
- assert(!cycle.due(60999));assert(cycle.due(61000));
- assert(cycle.take(61000)==P::Today);
- assert(!cycle.due(66000));assert(!cycle.due(120999));
- assert(cycle.due(121000));assert(cycle.take(121000)==P::Month);
- assert(cycle.take(181000)==P::All);
- assert(cycle.take(241000)==P::Today);
- // An overdue display starts one page, not a burst of missed pages.
- assert(cycle.due(500000));assert(cycle.take(500000)==P::Month);
- assert(!cycle.due(500001));
- // Survive millis() wrapping after ~49 days.
- cycle.reset(UINT32_MAX-1000);
- assert(!cycle.due(58998));assert(cycle.due(58999));
- assert(cycle.take(58999)==P::Today);
- assert(cafe::RANKING_DURATION_MS==5000);
+ assert(!cycle.update(false,61000) && !cycle.active()); // no periodic display
+ assert(cycle.update(true,62000) && cycle.period()==P::Today);
+ assert(!cycle.update(true,71999));assert(cycle.update(true,72000) && cycle.period()==P::Month);
+ assert(cycle.update(true,82000) && cycle.period()==P::All);
+ assert(cycle.update(true,92000) && cycle.period()==P::Today);
+ assert(cycle.update(false,92001) && !cycle.active());
+ assert(cycle.update(true,93000) && cycle.period()==P::Today);
+ assert(cycle.update(false,93001)); // invalid/stale sample removes the hand
+ cycle.reset(UINT32_MAX-1000);assert(cycle.update(true,UINT32_MAX-1000));
+ assert(!cycle.update(true,8998));assert(cycle.update(true,8999) && cycle.period()==P::Month);
  // Lighting: exact ten-minute cutoff and 30-second proximity grant.
  cafe::BacklightTimer light;light.reset(1000);
  assert(light.on(600999));assert(!light.on(601000));

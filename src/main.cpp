@@ -582,14 +582,24 @@ void rankingScreen(cafe::RankingPeriod period) {
 }
 void serviceDisplay() {
   uint32_t now=millis();
-  if((currentScreen==Screen::Boot && uint32_t(now-displayAt)>=15000) ||
-     (currentScreen==Screen::Result && uint32_t(now-displayAt)>=4000) ||
-     (currentScreen==Screen::Ranking && uint32_t(now-displayAt)>=cafe::RANKING_DURATION_MS)) idleScreen();
-  if(currentScreen!=Screen::Idle) return;
-  if(backlightOn && rankingCycle.due(now)) { rankingScreen(rankingCycle.take(now)); return; }
-  if(networkLine()!=lastNetworkLine) { idleScreen(); return; }
+  bool fresh=cafe::freshTofSample(tofOK,tofHasSample,tofSampleValid,uint32_t(now-lastTofResult));
+  bool hand=cafe::rankingHand(fresh,tofDistance);
+  if(hand) {backlightTimer.approach(now);serviceBacklight();}
+  if(currentScreen==Screen::Boot || currentScreen==Screen::Result) {
+    uint32_t duration=currentScreen==Screen::Boot?15000:4000;
+    if(uint32_t(now-displayAt)<duration) {rankingCycle.reset(now);return;}
+    idleScreen();
+  }
+  bool changed=rankingCycle.update(hand,now);
+  if(rankingCycle.active()) {
+    if(changed || currentScreen!=Screen::Ranking)rankingScreen(rankingCycle.period());
+    return;
+  }
+  if(currentScreen==Screen::Ranking)idleScreen();
+  if(currentScreen!=Screen::Idle)return;
+  if(networkLine()!=lastNetworkLine) {idleScreen();return;}
   if(uptimeMs()/1000!=lastSteamSecond) {
-    if(cupTime()!=lastCupTime) drawCupTime();
+    if(cupTime()!=lastCupTime)drawCupTime();
     drawSteam();
   }
 }
@@ -1156,7 +1166,11 @@ void setup() {
 
 // **************************************************************  Setup OTA      Over the Air Flashing
   ArduinoOTA.setHostname("CAFE-R107");
+#ifdef CAFE_OTA_PASSWORD_HASH
+  ArduinoOTA.setPasswordHash(CAFE_OTA_PASSWORD_HASH);
+#else
   ArduinoOTA.setPassword(cfg.adminPassword.c_str());
+#endif
   ArduinoOTA.begin();
 
 }

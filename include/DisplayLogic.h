@@ -5,24 +5,26 @@
 
 namespace cafe {
 enum class RankingPeriod : uint8_t { Today, Month, All };
-constexpr uint32_t RANKING_INTERVAL_MS=60000;
-constexpr uint32_t RANKING_DURATION_MS=5000;
-
-// Starts are 60 s apart (55 s normal display + 5 s ranking). Unsigned
-// subtraction handles millis() rollover. A busy display defers, never queues,
-// an overdue page; bookings take priority over the ranking.
+constexpr uint32_t RANKING_PAGE_MS=10000;
+constexpr uint16_t RANKING_HAND_MM=120;
+inline bool rankingHand(bool freshValid,uint16_t mm) {
+  return freshValid && mm>=20 && mm<RANKING_HAND_MM;
+}
 class RankingCycle {
-  uint32_t lastStart_=0;
-  RankingPeriod next_=RankingPeriod::Today;
+  uint32_t pageAt_=0;
+  bool active_=false;
+  RankingPeriod period_=RankingPeriod::Today;
 public:
-  void reset(uint32_t now) { lastStart_=now; next_=RankingPeriod::Today; }
-  bool due(uint32_t now) const { return uint32_t(now-lastStart_)>=RANKING_INTERVAL_MS; }
-  RankingPeriod take(uint32_t now) {
-    RankingPeriod result=next_;
-    next_=result==RankingPeriod::Today ? RankingPeriod::Month :
-          result==RankingPeriod::Month ? RankingPeriod::All : RankingPeriod::Today;
-    lastStart_=now;
-    return result;
+  void reset(uint32_t now) {pageAt_=now;active_=false;period_=RankingPeriod::Today;}
+  bool active() const {return active_;}
+  RankingPeriod period() const {return period_;}
+  bool update(bool hand,uint32_t now) {
+    if(!hand) {bool changed=active_;reset(now);return changed;}
+    if(!active_) {active_=true;period_=RankingPeriod::Today;pageAt_=now;return true;}
+    if(uint32_t(now-pageAt_)<RANKING_PAGE_MS)return false;
+    period_=period_==RankingPeriod::Today?RankingPeriod::Month:
+        period_==RankingPeriod::Month?RankingPeriod::All:RankingPeriod::Today;
+    pageAt_=now;return true;
   }
 };
 
@@ -46,3 +48,4 @@ inline std::vector<RankEntry> topFive(std::vector<RankEntry> entries) {
   return entries;
 }
 }
+
