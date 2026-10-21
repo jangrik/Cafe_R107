@@ -25,10 +25,15 @@ async function loadStatus(){
   $('#health').textContent=warnings.join(' ');$('#health').hidden=!warnings.length;
   $('#pendingBadge').textContent=status.pendingCount;$('#pendingBadge').hidden=!status.pendingCount;
   const info=$('#deviceInfo');info.replaceChildren();
-  const entries=[['Access Point',status.apSsid],['AP-Adresse',status.apIP],['WLAN-Client',status.staConnected?`${status.ssid} · ${status.staIP}`:'Nicht verbunden'],['Gerätezeit',displayTime(status.epoch)],['LittleFS',`${Math.round(status.fsUsed/1024)} / ${Math.round(status.fsTotal/1024)} KiB`],['TOF',sensorSummary(status.tofDiagnostics)],['RFID',sensorSummary(status.rfidDiagnostics)]];
+  const entries=[['Access Point',status.apSsid],['AP-Adresse',status.apIP],['WLAN-Modus',status.apOnly?'Nur Access Point':'Access Point + WLAN-Client'],['WLAN-Client',status.staConnected?`${status.activeSsid||status.ssid} · ${status.staIP}`:'Nicht verbunden'],['Gerätezeit',displayTime(status.epoch)],['LittleFS',`${Math.round(status.fsUsed/1024)} / ${Math.round(status.fsTotal/1024)} KiB`],['TOF',sensorSummary(status.tofDiagnostics)],['RFID',sensorSummary(status.rfidDiagnostics)]];
   for(const [label,value]of entries)info.append(el('dt',label),el('dd',value));
   const url=new URL(location.href);url.port=status.filemanagerPort;url.pathname='/';url.search='';url.hash='';$('#filemanager').href=url.href;
-  if(!$('#configForm').dataset.loaded){$('#configForm').elements.ssid.value=status.ssid;$('#configForm').dataset.loaded='1';}
+  if(!$('#configForm').dataset.loaded){
+    const f=$('#configForm');f.elements.apOnly.checked=status.configuredApOnly??status.apOnly??false;
+    const networks=status.wifiNetworks||[{ssid:status.ssid||''}];
+    for(let i=0;i<3;i++)f.elements['ssid'+i].value=networks[i]?.ssid||'';
+    f.dataset.loaded='1';
+  }
   const revision=status.lastSeenRevision??0,timeReady=Boolean(status.epoch);
   const editing=$('#people').contains(document.activeElement)&&document.activeElement.matches('input,select');
   if(!editing && (pendingCount!==status.pendingCount || lastSeenRevision!==revision || lastTimeReady!==timeReady)){
@@ -64,8 +69,16 @@ async function loadRegistry(){
 async function refresh(){if(refreshing)return;refreshing=true;try{await loadStatus();await Promise.all([loadReport(),loadHistory()]);}catch(e){$('#dot').classList.remove('ok');$('#connection').textContent='Verbindung prüfen';notify(e.message,true);}finally{refreshing=false;}}
 for(const b of document.querySelectorAll('[data-tab]'))b.addEventListener('click',()=>{for(const t of document.querySelectorAll('.tab'))t.hidden=t.id!==b.dataset.tab;for(const n of document.querySelectorAll('[data-tab]'))n.classList.toggle('active',n===b);});
 $('#personForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;action(f.querySelector('button'),async()=>{await api('person',{name:f.elements.name.value});f.reset();await loadRegistry();await loadReport();notify('Person angelegt. Jetzt einen Chip zuordnen.');});});
-$('#configForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;action(f.querySelector('button'),async()=>{const value=Object.fromEntries(new FormData(f));value.clearWifiPassword=f.elements.clearWifiPassword.checked;await api('config',configPayload(value));for(const n of ['wifiPassword','apPassword','adminPassword'])f.elements[n].value='';notify('Gespeichert. Bitte ESP32 per Reset neu starten. Danach gelten die neuen Einstellungen.');});});
+$('#configForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;action(f.querySelector('button'),async()=>{
+  const value=Object.fromEntries(new FormData(f));value.apOnly=f.elements.apOnly.checked;
+  for(let i=0;i<3;i++)value['clearWifiPassword'+i]=f.elements['clearWifiPassword'+i].checked;
+  await api('config',configPayload(value));
+  for(const n of ['wifiPassword0','wifiPassword1','wifiPassword2','apPassword','adminPassword'])f.elements[n].value='';
+  for(let i=0;i<3;i++)f.elements['clearWifiPassword'+i].checked=false;
+  notify('Gespeichert. Bitte ESP32 neu starten. Danach gelten WLAN-Modus und Zugänge.');
+});});
 $('#setTime').addEventListener('click',e=>action(e.currentTarget,async()=>{await api('time',{epoch:Math.floor(Date.now()/1000)});await refresh();notify('Browserzeit übernommen.');}));
 $('#weekSelect').addEventListener('change',()=>loadReport().catch(e=>notify(e.message,true)));$('#monthSelect').addEventListener('change',()=>loadReport().catch(e=>notify(e.message,true)));
 $('#older').addEventListener('click',()=>{before=oldest;loadHistory().catch(e=>notify(e.message,true));});$('#newest').addEventListener('click',()=>{before=null;loadHistory().catch(e=>notify(e.message,true));});
 refresh();setInterval(()=>{if(!document.hidden)refresh();},8000);
+

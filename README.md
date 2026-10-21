@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.0.12
+# Cafe R107 · Version 1.0.13
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -6,9 +6,177 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 
 
 **Direkt zu:** [OTA-Update](#firmware-per-ota-aktualisieren) ·
-[HTTP-API](#vollständige-http-api-stand-1012) ·
+[HTTP-API](#vollständige-http-api-stand-1013) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.0.13: AP-only, drei WLANs und serielle Diagnose
+
+Unter **Gerät & WLAN** gibt es jetzt **„Nur Access Point – keine WLAN-Client-Verbindung“**
+und drei WLAN-Plätze mit jeweils SSID und Kennwort. AP-only wird in config.json
+persistiert: Nach Neustart läuft der ESP in WIFI_AP, ohne Client-Verbindungsversuche,
+Scans oder NTP-Abfragen. Der Laptop verbindet sich als Client mit dem ESP-AP.
+Browserzeit, Webserver, RFID, TOF, Dateimanager und OTA bleiben verfügbar.
+Die gespeicherten WLAN-Zugänge bleiben beim Umschalten erhalten.
+
+### OTA-Kennwort ab 1.0.13
+
+OTA verwendet ab dieser Version das **gespeicherte Admin-Kennwort** des ESP.
+Es steht nicht mehr fest im Quellcode. Das Kennwort in der lokalen Umgebungsvariable
+**CAFE_OTA_PASSWORD** setzen; scripts/ota_auth.py übergibt es beim OTA-Upload.
+Es wird nicht in platformio.ini gespeichert. Ein OTA-Upload ohne Variable wird
+mit einer verständlichen Fehlermeldung abgebrochen; USB-Build und CI benötigen sie nicht.
+
+Windows PowerShell:
+
+```powershell
+$env:CAFE_OTA_PASSWORD = Read-Host "Admin-Kennwort des ESP"
+pio run -e cafe_r107_ota -t upload
+Remove-Item Env:CAFE_OTA_PASSWORD
+```
+
+Linux/macOS (Bash):
+
+```bash
+read -rsp 'Admin-Kennwort des ESP: ' CAFE_OTA_PASSWORD; echo
+export CAFE_OTA_PASSWORD
+pio run -e cafe_r107_ota -t upload
+unset CAFE_OTA_PASSWORD
+```
+
+**Beim ersten OTA-Update von 1.0.12 auf 1.0.13** muss die Variable noch das
+bisherige OTA-Kennwort enthalten, weil die laufende alte Firmware den Upload
+annimmt. Nach dem Update gilt das Geräte-Admin-Kennwort. Beim USB-Update ist
+kein OTA-Kennwort nötig. Nach einer Admin-Kennwortänderung gilt das neue
+Kennwort auch für OTA, sobald der ESP neu gestartet wurde.
+
+### Update ohne Verlust der Gerätedaten
+
+1. Sicherung über den Dateimanager, dann **git pull**.
+2. Firmware per USB hochladen:
+
+   ```sh
+   pio run -e cafe_r107 -t upload
+   ```
+
+   Alternativ per OTA: **pio run -e cafe_r107_ota -t upload**.
+3. Im Dateimanager das ESP-Verzeichnis **/www/** öffnen und die folgenden Dateien
+   aus **data/www/** einzeln ersetzen: **domain.js**, **app.js**, **style.css**,
+   zuletzt **index.html**. Danach Browser mit **Strg+F5** neu laden.
+4. Gewünschte WLAN-Einstellungen speichern und den ESP per Reset oder
+   **/api/restart** neu starten. Die Checkbox wirkt erst nach diesem Neustart.
+
+**Kein uploadfs und kein Ersetzen von config.json, registry.json, lastseen.json
+oder journal.ndjson.** Alte config.json-Dateien bleiben lesbar: Die bisherige
+SSID und ihr Kennwort werden als Platz 1 übernommen, Plätze 2/3 bleiben leer,
+apOnly ist zunächst false. Erst beim nächsten Speichern werden die zusätzlichen
+Felder atomar ergänzt. Bestehende Personen, Chips und Buchungen bleiben erhalten.
+
+### Auswahl der WLAN-Zugänge
+
+Ist AP-only aus, arbeitet der ESP als AP+STA. Die drei Plätze sind normale
+SSID-/Kennwort-Zugänge (keine Einrichtung von Enterprise-802.1X oder Captive Portals).
+Leere SSID = Platz nicht verwenden. Leeres Passwortfeld in der Website =
+Kennwort des Platzes beibehalten; für ein offenes WLAN die jeweilige Checkbox
+verwenden. Wird die SSID geändert, gegebenenfalls auch das Kennwort ändern.
+
+Die Standardbibliothek WiFiMulti des gepinnten Cores 2.0.17 scannt synchron
+und wartet beim Verbindungsaufbau. Deshalb wird hier stattdessen eine
+asynchrone Auswahl verwendet, ohne blockierende Warteschleife in loop():
+
+- Stärkstes sichtbares bekanntes WLAN zuerst; bei erfolglosem Aufbau nach
+  15 Sekunden STA trennen und beim nächsten Suchlauf einen anderen Platz versuchen.
+- Neue Suchläufe höchstens alle 30 Sekunden. Eine bestehende Verbindung wird
+  nicht allein wegen eines stärkeren anderen WLANs gewechselt.
+- Solange ein Gerät am ESP-AP angemeldet ist, keine neuen Suchläufe und keine
+  neue Verbindung nach einem Suchlauf starten. Nach Abmeldung des letzten
+  AP-Clients können die Versuche fortgesetzt werden. Ein bereits gestarteter
+  Verbindungsversuch kann bis zu seinem Timeout weiterlaufen.
+- Ein bereits laufender Scan wird fertig abgeholt; ist inzwischen ein AP-Client
+  angemeldet, wird daraus keine neue Verbindung gestartet.
+- AP und STA teilen den Funkkanal. Client-Verbindungsaufbau kann deshalb auch
+  im asynchronen Ablauf den AP beeinflussen; AP-only schließt diese Ursache aus.
+- Im AP-only-Modus gibt es überhaupt keine WLAN-Client-Suche, auch ohne Laptop.
+
+### Serielle Untersuchung der Abbrüche
+
+Monitor mit **115200 Baud** öffnen:
+
+```sh
+pio device monitor -b 115200
+```
+
+Beim Start steht **[BOOT] reset=…** mit Resetgrund. **[WIFI … ms]** enthält
+Zeit seit ESP-Start, AP-Start/Stopp, Anmeldung/Abmeldung der AP-Clients
+(MAC und AID), STA-Verbindungsereignisse, Scan-/Verbindungsversuche und Kanal.
+STA-Abmeldungen enthalten den Grundcode mit Namen. Für AP-Client-Abmeldungen
+liefert Core 2.0.17 keinen Grundcode: **reason=unavailable_in_core_2**.
+Es wird kein Grund geraten. Kanal/Clientzahl/Status neben einem Ereignis sind
+zum Zeitpunkt der Ausgabe gemessen; der Ereigniszeitstempel stammt aus dem Callback.
+
+Alle 30 Sekunden und bei erkanntem Kanalwechsel erscheint eine Zustandszeile
+mit AP-Clientzahl, Kanal, STA-Status, Scan-/Verbindungszustand, freiem Heap,
+minimalem freiem Heap, größtem freien Block und verworfenen Diagnoseereignissen.
+Callbacks schreiben nur in eine begrenzte Queue; Ausgabe und WLAN-Steuerung
+laufen in der Hauptschleife. Neue Diagnosemeldungen enthalten keine Kennwörter.
+Die bisherige Startausgabe enthält allerdings AP-/Admin-Kennwörter: vor dem Teilen
+entfernen oder nur **[BOOT]**- und **[WIFI]**-Zeilen weitergeben.
+
+Für den Bürotest zunächst AP-only aktivieren und neu starten. Laptop verbinden,
+Monitor vom Start bis über einen Abbruch hinaus mitlaufen lassen, dazu unter Windows:
+
+```cmd
+ping -t 192.168.4.1
+```
+
+Die passende Uhrzeit des Abbruchs und die seriellen Zeilen davor/danach sichern.
+Ein Vergleichstest mit deaktiviertem AP-only ist erst danach sinnvoll.
+Ob der Laptop wegen fehlenden Internets wechselt, ist aus einem AP-Abmeldeereignis
+allein nicht sicher erkennbar; dafür gegebenenfalls zusätzlich das Windows-WLAN-Protokoll nutzen.
+Die Diagnose ersetzt noch keinen Dauertest am realen Büro-WLAN.
+
+### API-Ergänzungen ab 1.0.13
+
+**POST /api/config**, HTTP-Basic-Login und **X-Cafe-Request: 1** wie bisher:
+
+```json
+{
+  "apOnly": true,
+  "wifiNetworks": [
+    {"ssid": "Buero"},
+    {"ssid": "Zuhause", "password": "BEISPIEL-KENNWORT"},
+    {"ssid": "Gastnetz", "password": ""}
+  ]
+}
+```
+
+wifiNetworks enthält, wenn übergeben, **genau drei Objekte** mit jeweils einer
+SSID (maximal 32 UTF-8-Bytes). password ist optional (maximal 63 Bytes):
+fehlend = bisheriges Kennwort dieses Platzes behalten, leer = offenes WLAN.
+apOnly muss ein JSON-Boolean sein. Nicht übergebene Einstellungen bleiben erhalten.
+Alte API-Aufrufe mit ssid/wifiPassword ändern weiterhin nur Platz 1, sofern kein
+wifiNetworks-Array mitgeschickt wird. Die Datei behält schema:1 und spiegelt
+Platz 1 zusätzlich in den alten Schlüsseln. Antwort unverändert:
+**{"ok":true,"restartRequired":true}**; aktiviert erst nach Neustart.
+
+**GET /api/status** ergänzt:
+
+| Feld | Bedeutung |
+|---|---|
+| apOnly | Aktuell laufender Modus |
+| configuredApOnly | Gespeicherter Modus für den nächsten Neustart |
+| wifiNetworks | Drei gespeicherte Plätze, jeweils ssid und hasPassword; keine Kennwörter |
+| activeSsid | Aktuell verbundenes WLAN, sonst leer; ssid bleibt kompatibel Platz 1 |
+| wifiChannel / apClients | Aktueller Funkkanal / am ESP-AP angemeldete Clients |
+| wifiScanRunning / wifiConnecting | Laufender Scan / Verbindungsversuch |
+| wifiLogDropped | Nicht in die Ereignisqueue passende Ereignisse seit Start |
+| freeHeap / minFreeHeap | Freier und minimaler freier Heap in Bytes |
+| resetReason | Resetgrund als Kurztext |
+
+Die Website zeigt gespeicherte WLANs beim ersten Laden des Formulars und überschreibt
+keine laufenden Eingaben bei der automatischen Aktualisierung. Nach einem Speichern
+zeigt der Status weiter den laufenden Modus, die zusätzlichen Konfigurationsfelder
+dagegen die bereits gespeicherten Werte für den nächsten Neustart.
 
 ## Neu in 1.0.12: OTA über WLAN
 
@@ -26,9 +194,9 @@ müssen sich über das lokale Netzwerk erreichen können.
 2. In **platformio.ini** die Umgebung **cafe_r107_ota** prüfen:
    upload_protocol = espota; upload_port = 192.168.123.60.
    Die Adresse gegebenenfalls durch die aktuelle Client-IP ersetzen.
-3. Das Upload-Kennwort in **upload_flags = --auth=…** muss zum mit
-   **ArduinoOTA.setPassword(...)** in src/main.cpp eingestellten Kennwort passen.
-   Es ist unabhängig vom HTTP-Admin- und AP-Kennwort.
+3. Für 1.0.12 galt das damals fest konfigurierte OTA-Kennwort. Ab 1.0.13
+   **CAFE_OTA_PASSWORD** lokal setzen; es muss zum Admin-Kennwort der laufenden
+   Firmware passen (siehe Übergangshinweis oben).
 4. Firmware über WLAN bauen und hochladen:
 
 ~~~sh
@@ -54,9 +222,9 @@ als Alternative verfügbar.
 Kein uploadfs für ein gewöhnliches Update verwenden. Webdateien bei Bedarf
 einzeln über den Dateimanager auf Port 8080 ersetzen. Nach dem Neustart muss
 die Uhrzeit erneut per NTP oder Browser gesetzt werden.
-Diese Dokumentationsänderung behält die Firmwareversion **1.0.12** bei.
+Dieser Abschnitt beschreibt die Einführung von OTA in 1.0.12; die aktuelle Version ist 1.0.13.
 
-## Vollständige HTTP-API (Stand 1.0.12)
+## Vollständige HTTP-API (Stand 1.0.13)
 
 ### Adresse und Anmeldung
 
@@ -99,7 +267,7 @@ Basisadresse beispielsweise **http://192.168.123.60**, am AP **http://192.168.4.
 | POST | /api/forget | {"uid":"UID"} | Zuordnung und Eintrag als neuer Chip entfernen; ok |
 | POST | /api/cancel | {"id":123} | Bezug mit dieser Buchungs-ID stornieren; ok |
 | POST | /api/time | {"epoch":1792490400} | Uhrzeit und gegebenenfalls Zeitanker setzen; ok |
-| POST | /api/config | Teilmenge von ssid, wifiPassword, apPassword, adminPassword | Speichern; ok und restartRequired:true |
+| POST | /api/config | apOnly, wifiNetworks (3 Plätze), apPassword, adminPassword; legacy ssid/wifiPassword für Platz 1 | Speichern; ok und restartRequired:true |
 
 Kein API-Befehl zum künstlichen Buchen, Löschen einer Person oder manuellen
 TOF-Reset: Buchungen entstehen durch Chipkontakt; die TOF-Wiederherstellung
@@ -257,7 +425,7 @@ Unter Linux/macOS curl statt curl.exe verwenden.
 ESPFMfGK läuft separat auf **Port 8080**, mit demselben HTTP-Admin-Login.
 Seine Dateiverwaltungsrouten gehören nicht zur obigen Cafe-R107-API.
 Oberfläche: http://192.168.123.60:8080/ oder http://192.168.4.1:8080/.
-ArduinoOTA auf Port 3232 verwendet sein eigenes Upload-Kennwort und PlatformIO,
+ArduinoOTA auf Port 3232 verwendet ab 1.0.13 das Geräte-Admin-Kennwort und PlatformIO,
 keinen Pfad unter /api/.
 
 ## Neu in 1.0.11: RFID-Diagnose und gezielter Reader-Reset
@@ -707,14 +875,14 @@ Ein separater ESP-Timer begrenzt jeden Ton auch bei beschäftigtem Webserver.
 
 ## Netzwerk und Uhrzeit
 
-- AP und Client laufen gleichzeitig (`WIFI_AP_STA`). Der AP bleibt auch bei
+- Standard: AP und Client laufen gleichzeitig (`WIFI_AP_STA`); mit apOnly nur AP (`WIFI_AP`). Der AP bleibt auch bei
   fehlendem oder falschem Client-WLAN verfügbar. Das Gerät wartet beim Start
   nicht auf eine Verbindung. Der Dateimanager startet ebenfalls im AP-Betrieb.
 - Bei Client-Verbindung wird die vom Router zugewiesene Adresse auf dem LCD
   und im Web angezeigt. Dateimanager: dieselbe Adresse auf **Port 8080**.
 - Beim WLAN-Kanalwechsel durch den verbundenen Client kann die AP-Verbindung
   kurz unterbrochen werden; danach wieder verbinden.
-- NTP startet erst bei bestehender Client-Verbindung. Zeitzone Berlin mit
+- NTP startet nur bei bestehender Client-Verbindung und deaktiviertem AP-only-Modus. Zeitzone Berlin mit
   Sommerzeit, ISO-Wochen beginnen montags. Zulässiger Zeitbereich 2024–2037
   passend zum gepinnten Arduino-Core 2.0.17 mit 32-Bit-Zeitbasis.
 - Ohne Uhrzeit werden Bezüge mit zufälliger Startkennung und 64-Bit-Laufzeit
@@ -734,7 +902,7 @@ LittleFS bestehen; **Filesystem-Upload ersetzt das komplette Dateisystem**.
 
 | Datei auf dem ESP | Inhalt |
 |---|---|
-| `/config.json` | Client-WLAN, AP- und Admin-Kennwort |
+| `/config.json` | Drei Client-WLANs, AP-only-Modus, AP- und Admin-Kennwort |
 | `/registry.json` | Personen, Chipzuordnungen, neue Chips |
 | `/journal.ndjson` | Anhängendes Journal: Kaffee, Storno, Zeitanker |
 | `/lastseen.json` | Letzte Chipkontakte (ab 1.0.8, vom Gerät angelegt) |
@@ -800,4 +968,5 @@ Tests auf dem Rechner ersetzen keine Abnahme auf deinem ESP32.
 Von [Holger Lembke](https://github.com/holgerlembke/ESPFMfGK), eingefrorener
 Upstream-Commit `ac3b699c35705d34df06ed4a978fb5add4310463`.
 Lokale Anpassungen und Lizenz: [lib/ESPFMfGK/UPSTREAM.md](lib/ESPFMfGK/UPSTREAM.md).
+
 

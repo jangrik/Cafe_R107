@@ -1,4 +1,5 @@
 #include "Domain.h"
+#include "NetworkLogic.h"
 #include "DisplayLogic.h"
 #include "Backlight.h"
 #include "HealthLogic.h"
@@ -6,6 +7,14 @@
 #include <cstdlib>
 #include <iostream>
 int main(){
+ assert(!cafe::mayStartWifiScan(true,0,false,60000));
+ assert(!cafe::mayStartWifiScan(false,1,false,60000));
+ assert(cafe::mayStartWifiScan(false,0,false,0));
+ assert(!cafe::mayStartWifiScan(false,0,true,29999));
+ assert(cafe::mayStartWifiScan(false,0,true,30000));
+ const uint32_t scanAt=UINT32_MAX-1000,scanNow=28999;
+ assert(cafe::mayStartWifiScan(false,0,true,uint32_t(scanNow-scanAt)));
+
  cafe::ReaderFailures failures;
  for(unsigned i=0;i<9;++i) {failures.observe(true);assert(!failures.repeated());}
  failures.observe(false);assert(failures.count()==0); // no-card resets the streak
@@ -154,4 +163,5 @@ int main(){
  assert(cafe::anchoredEpoch(0,5000,1760000000,65000)==1759999940);
  std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings, display cadence and backlight/presence passed.\n";
 }
+
 

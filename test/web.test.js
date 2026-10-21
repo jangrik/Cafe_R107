@@ -11,3 +11,20 @@ test('password whitespace is preserved',()=>assert.deepEqual(configPayload({ssid
 test('chip timestamps show date and seconds in Berlin time',()=>assert.match(displayChipTime(1711924201),/01\.04\.2024.*00:30:01/));
 test('old chip without recorded contact shows a dash',()=>assert.equal(displayChipTime(undefined),'—'));
 test('recorded contact without clock remains explicitly undated',()=>assert.equal(displayChipTime(0),'Uhrzeit unbekannt'));
+
+
+test('AP-only keeps all three network slots and does not send blank passwords',()=>{
+  assert.deepEqual(configPayload({apOnly:true,ssid0:' Office ',ssid1:'Home',ssid2:'',wifiPassword0:'',wifiPassword1:''}),{
+    apOnly:true,wifiNetworks:[{ssid:'Office'},{ssid:'Home'},{ssid:''}]
+  });
+});
+test('each slot independently preserves, sets or deliberately clears passwords',()=>{
+  assert.deepEqual(configPayload({apOnly:false,ssid0:'A',ssid1:'B',ssid2:'C',wifiPassword0:' pass ',clearWifiPassword1:true,wifiPassword2:''}),{
+    apOnly:false,wifiNetworks:[{ssid:'A',password:' pass '},{ssid:'B',password:''},{ssid:'C'}]
+  });
+});
+test('turning AP-only off retains the saved SSIDs',()=>{
+  const form={apOnly:true,ssid0:'A',ssid1:'B',ssid2:'C'};
+  const before=configPayload(form);form.apOnly=false;const after=configPayload(form);
+  assert.deepEqual(after.wifiNetworks,before.wifiNetworks);assert.equal(after.apOnly,false);
+});

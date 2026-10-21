@@ -2,3 +2,6 @@
 
 .chipidentity{display:flex;flex-direction:column;gap:6px;min-width:180px}
 .chiptime{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+
+#configForm fieldset{border:1px solid var(--line,#d9d4c8);border-radius:10px;padding:12px;margin:8px 0}#configForm legend{font-weight:600;padding:0 6px}

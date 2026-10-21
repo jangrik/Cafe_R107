@@ -3,6 +3,10 @@
 #include <Wire.h>
 #include <VL53L0X.h>
 #include <WiFi.h>
+#include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include "NetworkLogic.h"
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -66,7 +70,14 @@ std::map<String,LastSeen> lastSeen;
 uint64_t lastSeenSequence=0;
 String lastSeenError;
 bool lastSeenWritable=true;
-struct Config { String ssid, wifiPassword, apPassword, adminPassword; } cfg;
+struct WifiCredential {String ssid,password;};
+struct Config { WifiCredential wifi[3];bool apOnly=false;String apPassword,adminPassword; } cfg,savedCfg;
+bool validConfig(const Config& c) {
+  if(c.apPassword.length()<8 || c.apPassword.length()>63 ||
+      c.adminPassword.length()<8 || c.adminPassword.length()>63)return false;
+  for(const auto& n:c.wifi)if(n.ssid.length()>32 || n.password.length()>63)return false;
+  return true;
+}
 std::vector<Person> people;
 std::vector<Card> cards;
 std::vector<Pending> pending;
@@ -75,7 +86,7 @@ std::set<uint32_t> cancellations;
 String session, storageError;
 bool mounted=false, journalOK=true, readerOK=false, fmReady=false, ntpStarted=false;
 uint32_t lastId=0;
-uint32_t lastPoll=0, lastPresence=0, lastAccepted=0, displayAt=0, lastWifiRetry=0;
+uint32_t lastPoll=0, lastPresence=0, lastAccepted=0, displayAt=0;
 bool latched=false, acceptedOnce=false;
 enum class Screen { Boot, Idle, Result, Ranking };
 Screen currentScreen=Screen::Boot;
@@ -399,7 +410,10 @@ int64_t lastSeenEpoch(const LastSeen& seen) {
 }
 
 bool saveConfig() {
-  JsonDocument d; d["schema"]=1; d["ssid"]=cfg.ssid; d["wifiPassword"]=cfg.wifiPassword;
+  JsonDocument d; d["schema"]=1; d["ssid"]=cfg.wifi[0].ssid; d["wifiPassword"]=cfg.wifi[0].password;
+  d["apOnly"]=cfg.apOnly;
+  auto networks=d["wifiNetworks"].to<JsonArray>();
+  for(const auto& n:cfg.wifi) {auto o=networks.add<JsonObject>();o["ssid"]=n.ssid;o["password"]=n.password;}
   d["apPassword"]=cfg.apPassword; d["adminPassword"]=cfg.adminPassword;
   return saveJson("/config.json",d);
 }
@@ -419,9 +433,22 @@ bool loadConfig() {
   if(!f || deserializeJson(d,f) || d["schema"]!=1) return false;
   if(!d["ssid"].is<String>() || !d["wifiPassword"].is<String>() || !d["apPassword"].is<String>() || !d["adminPassword"].is<String>()) return false;
   Config next;
-  next.ssid=d["ssid"].as<String>(); next.wifiPassword=d["wifiPassword"].as<String>();
+  next.wifi[0].ssid=d["ssid"].as<String>(); next.wifi[0].password=d["wifiPassword"].as<String>();
   next.apPassword=d["apPassword"].as<String>(); next.adminPassword=d["adminPassword"].as<String>();
-  if(next.ssid.length()>32 || next.wifiPassword.length()>63 || next.apPassword.length()<8 || next.apPassword.length()>63 || next.adminPassword.length()<8 || next.adminPassword.length()>63) return false;
+  // Legacy schema 1 contains only ssid/wifiPassword. Preserve it in slot 1.
+  if(d.containsKey("apOnly")) {
+    if(!d["apOnly"].is<bool>())return false;
+    next.apOnly=d["apOnly"].as<bool>();
+  }
+  if(d.containsKey("wifiNetworks")) {
+    if(!d["wifiNetworks"].is<JsonArray>() || d["wifiNetworks"].size()!=3)return false;
+    for(unsigned i=0;i<3;++i) {
+      if(!d["wifiNetworks"][i]["ssid"].is<String>() || !d["wifiNetworks"][i]["password"].is<String>())return false;
+      next.wifi[i].ssid=d["wifiNetworks"][i]["ssid"].as<String>();
+      next.wifi[i].password=d["wifiNetworks"][i]["password"].as<String>();
+    }
+  }
+  if(!validConfig(next))return false;
   cfg=next; return true;
 }
 bool loadRegistry() {
@@ -727,6 +754,7 @@ void apiRestart() {
   web.sendHeader("Connection","close");sendJson(d,202);
 }
 
+void networkStatusJson(JsonDocument& d);
 void apiStatus() {
   if(!auth()) return; JsonDocument d;
   d["backlightOn"]=backlightOn;d["backlightMode"]=backlightTimer.modeName();d["tofOK"]=tofOK;
@@ -735,7 +763,8 @@ void apiStatus() {
   tofDiagnosticJson(d["tofDiagnostics"].to<JsonObject>());
   rfidDiagnosticJson(d["rfidDiagnostics"].to<JsonObject>());
   d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
-  d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.ssid;
+  d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.wifi[0].ssid;
+  networkStatusJson(d);
   d["epoch"]=epochNow(); d["readerOK"]=readerOK; d["storageError"]=storageError;
   d["journalOK"]=journalOK; d["fsUsed"]=mounted?LittleFS.usedBytes():0; d["fsTotal"]=mounted?LittleFS.totalBytes():0;
   d["session"]=session; d["uptime"]=uptimeMs(); d["pendingCount"]=pending.size(); d["filemanagerPort"]=FM_PORT;
@@ -859,12 +888,29 @@ void apiTime() {
 void apiConfig() {
   if(!auth(true) || !writable())return;JsonDocument d;if(!body(d))return;Config old=cfg;
   if(!loadConfig()) {cfg=old;error(503,"Gespeicherte Konfiguration nicht lesbar");return;}
-  if(d["ssid"].is<String>())cfg.ssid=d["ssid"].as<String>();
-  if(d["wifiPassword"].is<String>())cfg.wifiPassword=d["wifiPassword"].as<String>();
+  auto reject=[&](){cfg=old;error(400,"Ungueltige WLAN-Konfiguration (3 Zugaenge, SSID max.32, Passwort max.63 Bytes)");};
+  if(d.containsKey("apOnly")) {
+    if(!d["apOnly"].is<bool>()) {reject();return;}
+    cfg.apOnly=d["apOnly"].as<bool>();
+  }
+  if(d.containsKey("wifiNetworks")) {
+    if(!d["wifiNetworks"].is<JsonArray>() || d["wifiNetworks"].size()!=3) {reject();return;}
+    for(unsigned i=0;i<3;++i) {
+      auto n=d["wifiNetworks"][i];
+      if(!n.is<JsonObject>() || !n["ssid"].is<String>() ||
+          (n.containsKey("password") && !n["password"].is<String>())) {reject();return;}
+      cfg.wifi[i].ssid=n["ssid"].as<String>();
+      if(n.containsKey("password"))cfg.wifi[i].password=n["password"].as<String>();
+    }
+  } else { // Existing API clients can continue to update slot 1.
+    if(d["ssid"].is<String>())cfg.wifi[0].ssid=d["ssid"].as<String>();
+    if(d["wifiPassword"].is<String>())cfg.wifi[0].password=d["wifiPassword"].as<String>();
+  }
   if(d["apPassword"].is<String>() && d["apPassword"].as<String>().length())cfg.apPassword=d["apPassword"].as<String>();
   if(d["adminPassword"].is<String>() && d["adminPassword"].as<String>().length())cfg.adminPassword=d["adminPassword"].as<String>();
-  if(cfg.ssid.length()>32 || cfg.wifiPassword.length()>63 || cfg.apPassword.length()<8 || cfg.apPassword.length()>63 || cfg.adminPassword.length()<8 || cfg.adminPassword.length()>63) {cfg=old;error(400,"SSID max.32, Passwoerter 8-63 Zeichen (Client-WLAN auch leer)");return;}
+  if(!validConfig(cfg)) {reject();return;}
   if(!saveConfig()){cfg=old;error(507,"Konfiguration nicht gespeichert");return;}
+  savedCfg=cfg;
   JsonDocument out;out["ok"]=true;out["restartRequired"]=true;sendJson(out);
   // Apply after restart: don't interrupt the HTTP response/AP or change active auth mid-request.
   cfg=old;
@@ -933,9 +979,113 @@ void setupWeb() {
     fmReady=filemgr.begin();
   }
 }
+// WiFi callbacks run in a separate task. Queue small POD records only;
+// all logging and control happens in loop(), never in the callback.
+struct NetworkEvent {uint32_t at;arduino_event_id_t id;uint8_t reason,aid,mac[6];};
+QueueHandle_t networkEvents=nullptr;
+volatile uint32_t networkDroppedEvents=0;
+uint32_t networkScanAt=0,networkAttemptAt=0,networkLogAt=0;
+bool networkScanning=false,networkConnecting=false,networkTried=false;
+uint8_t networkAttemptedSlots=0;
+int networkChannel=-1;
+void networkEvent(arduino_event_id_t event,arduino_event_info_t info) {
+  if(event==ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED)return;
+  NetworkEvent e{};e.at=millis();e.id=event;
+  if(event==ARDUINO_EVENT_WIFI_STA_DISCONNECTED)e.reason=info.wifi_sta_disconnected.reason;
+  if(event==ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+    e.aid=info.wifi_ap_staconnected.aid;memcpy(e.mac,info.wifi_ap_staconnected.mac,6);
+  }
+  if(event==ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
+    e.aid=info.wifi_ap_stadisconnected.aid;memcpy(e.mac,info.wifi_ap_stadisconnected.mac,6);
+  }
+  if(networkEvents && xQueueSend(networkEvents,&e,0)!=pdTRUE)++networkDroppedEvents;
+}
+const char* resetReasonName(esp_reset_reason_t reason) {
+  switch(reason) {
+    case ESP_RST_POWERON:return "power_on";case ESP_RST_SW:return "software";
+    case ESP_RST_PANIC:return "panic";case ESP_RST_INT_WDT:return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT:return "task_watchdog";case ESP_RST_WDT:return "watchdog";
+    case ESP_RST_BROWNOUT:return "brownout";case ESP_RST_DEEPSLEEP:return "deep_sleep";
+    case ESP_RST_EXT:return "external";default:return "other";
+  }
+}
+void networkStatusJson(JsonDocument& d) {
+  d["apOnly"]=cfg.apOnly;d["activeSsid"]=WiFi.status()==WL_CONNECTED?WiFi.SSID():String("");
+  d["wifiChannel"]=WiFi.channel();d["apClients"]=WiFi.softAPgetStationNum();
+  d["wifiScanRunning"]=networkScanning;d["wifiConnecting"]=networkConnecting;
+  d["wifiLogDropped"]=networkDroppedEvents;
+  d["freeHeap"]=ESP.getFreeHeap();d["minFreeHeap"]=ESP.getMinFreeHeap();
+  d["resetReason"]=resetReasonName(esp_reset_reason());
+  auto networks=d["wifiNetworks"].to<JsonArray>();
+  // Saved settings, not runtime settings: permit several saves before reboot.
+  d["configuredApOnly"]=savedCfg.apOnly;
+  for(const auto& n:savedCfg.wifi) {
+    auto o=networks.add<JsonObject>();o["ssid"]=n.ssid;o["hasPassword"]=n.password.length()>0;
+  }
+}
 void serviceNetwork() {
-  if(WiFi.status()==WL_CONNECTED && !ntpStarted) {configTzTime(cafe::TZ_BERLIN,"pool.ntp.org","time.cloudflare.com");ntpStarted=true;}
-  if(cfg.ssid.length() && WiFi.status()!=WL_CONNECTED && uint32_t(millis()-lastWifiRetry)>=30000) {lastWifiRetry=millis();WiFi.reconnect();}
+  uint32_t now=millis();NetworkEvent event;
+  while(networkEvents && xQueueReceive(networkEvents,&event,0)==pdTRUE) {
+    Serial.printf("[WIFI %lu ms] %s",(unsigned long)event.at,WiFi.eventName(event.id));
+    if(event.id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+      Serial.printf(" reason=%u (%s)",event.reason,WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(event.reason)));
+    if(event.id==ARDUINO_EVENT_WIFI_AP_STACONNECTED || event.id==ARDUINO_EVENT_WIFI_AP_STADISCONNECTED)
+      Serial.printf(" peer=%02X:%02X:%02X:%02X:%02X:%02X aid=%u reason=unavailable_in_core_2",
+          event.mac[0],event.mac[1],event.mac[2],event.mac[3],event.mac[4],event.mac[5],event.aid);
+    if(event.id==ARDUINO_EVENT_WIFI_STA_GOT_IP)Serial.printf(" ip=%s",WiFi.localIP().toString().c_str());
+    Serial.printf(" channel=%ld apClients=%u staStatus=%u\n",(long)WiFi.channel(),WiFi.softAPgetStationNum(),WiFi.status());
+  }
+  if(uint32_t(now-networkLogAt)>=30000 || networkChannel!=WiFi.channel()) {
+    networkLogAt=now;networkChannel=WiFi.channel();
+    Serial.printf("[WIFI %lu ms] state apOnly=%u apClients=%u channel=%d staStatus=%u scan=%u connecting=%u heap=%lu minHeap=%lu maxBlock=%lu dropped=%lu\n",
+      (unsigned long)now,cfg.apOnly,WiFi.softAPgetStationNum(),networkChannel,WiFi.status(),networkScanning,networkConnecting,
+      (unsigned long)ESP.getFreeHeap(),(unsigned long)ESP.getMinFreeHeap(),(unsigned long)ESP.getMaxAllocHeap(),(unsigned long)networkDroppedEvents);
+  }
+  if(cfg.apOnly)return; // WIFI_AP: no STA scans, association attempts or NTP.
+  if(WiFi.status()==WL_CONNECTED) {
+    networkConnecting=false;networkAttemptedSlots=0;
+    if(!ntpStarted) {configTzTime(cafe::TZ_BERLIN,"pool.ntp.org","time.cloudflare.com");ntpStarted=true;}
+    return;
+  }
+  if(networkConnecting) {
+    if(uint32_t(now-networkAttemptAt)<15000)return;
+    Serial.printf("[WIFI %lu ms] connect_timeout; disconnect STA only\n",(unsigned long)now);
+    WiFi.disconnect(false,false);networkConnecting=false;networkScanAt=now;
+    return;
+  }
+  bool configured=false;for(const auto& n:cfg.wifi)if(n.ssid.length())configured=true;
+  if(!configured)return;
+  if(networkScanning) {
+    int count=WiFi.scanComplete();if(count==WIFI_SCAN_RUNNING)return;
+    networkScanning=false;networkScanAt=now;
+    // A laptop may have joined during the scan: do not start association now.
+    if(WiFi.softAPgetStationNum()>0) {WiFi.scanDelete();return;}
+    int best=-1,bestSlot=-1,bestRssi=-1000;
+    for(int i=0;i<count;++i)for(unsigned slot=0;slot<3;++slot) {
+      if(networkAttemptedSlots&(1U<<slot))continue;
+      if(cfg.wifi[slot].ssid.length() && cfg.wifi[slot].ssid==WiFi.SSID(i) && WiFi.RSSI(i)>bestRssi) {
+        if(WiFi.encryptionType(i)!=WIFI_AUTH_OPEN && !cfg.wifi[slot].password.length())continue;
+        best=i;bestSlot=slot;bestRssi=WiFi.RSSI(i);
+      }
+    }
+    if(best>=0) {
+      uint8_t bssid[6];memcpy(bssid,WiFi.BSSID(best),6);int channel=WiFi.channel(best);
+      WiFi.scanDelete();networkAttemptedSlots|=1U<<bestSlot;
+      Serial.printf("[WIFI %lu ms] connect slot=%d channel=%d rssi=%d\n",(unsigned long)now,bestSlot+1,channel,bestRssi);
+      WiFi.begin(cfg.wifi[bestSlot].ssid.c_str(),cfg.wifi[bestSlot].password.c_str(),channel,bssid);
+      networkConnecting=true;networkAttemptAt=now;
+    } else {
+      WiFi.scanDelete();networkAttemptedSlots=0;
+      Serial.printf("[WIFI %lu ms] no untried matching WLAN (scan=%d); retry after 30s\n",(unsigned long)now,count);
+    }
+    return;
+  }
+  if(!cafe::mayStartWifiScan(cfg.apOnly,WiFi.softAPgetStationNum(),networkTried,uint32_t(now-networkScanAt)))return;
+  networkTried=true;networkScanAt=now;
+  Serial.printf("[WIFI %lu ms] async_scan_start\n",(unsigned long)now);
+  int result=WiFi.scanNetworks(true);
+  networkScanning=result==WIFI_SCAN_RUNNING || result>=0;
+  if(!networkScanning)Serial.printf("[WIFI %lu ms] async_scan_failed=%d\n",(unsigned long)now,result);
 }
 void setup() {
   Serial.begin(115200);
@@ -963,9 +1113,15 @@ void setup() {
     else loadJournal();
     if(!loadLastSeen()) {lastSeenWritable=false;lastSeenError="lastseen.json ungueltig: bitte sichern und pruefen";}
   }
-  WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.setHostname("cafe-r107");
+  Serial.printf("[BOOT] reset=%s (%d) heap=%lu\n",resetReasonName(esp_reset_reason()),int(esp_reset_reason()),(unsigned long)ESP.getFreeHeap());
+  networkEvents=xQueueCreate(24,sizeof(NetworkEvent));
+  if(!networkEvents)Serial.println("[WIFI] event_queue_allocation_failed");
+  savedCfg=cfg;
+  WiFi.onEvent(networkEvent);
+  WiFi.persistent(false);WiFi.setAutoReconnect(false);
+  WiFi.mode(cfg.apOnly?WIFI_AP:WIFI_AP_STA);WiFi.setHostname("cafe-r107");
   bool apOK=WiFi.softAP(apName().c_str(),cfg.apPassword.c_str());
-  if(cfg.ssid.length()){WiFi.setAutoReconnect(true);WiFi.begin(cfg.ssid.c_str(),cfg.wifiPassword.c_str());}
+  Serial.printf("[WIFI] mode=%s; background scans pause while AP has clients\n",cfg.apOnly?"AP_ONLY":"AP_STA");
   setupWeb();setupTof();healthSchedule.reset(millis());
   tofDiagnostics.error=tofOK?"waiting_for_measurement":"not_initialized";
   Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
@@ -977,7 +1133,7 @@ void setup() {
 
 // **************************************************************  Setup OTA      Over the Air Flashing
   ArduinoOTA.setHostname("CAFE-R107");
-  ArduinoOTA.setPassword("Kether");
+  ArduinoOTA.setPassword(cfg.adminPassword.c_str());
   ArduinoOTA.begin();
 
 }
@@ -989,4 +1145,5 @@ void loop() {
   if(restartRequest.due(millis())) {toneHz(0);ESP.restart();}
   delay(1);
 }
+
 
