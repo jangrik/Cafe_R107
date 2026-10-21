@@ -25,7 +25,7 @@ async function loadStatus(){
   $('#health').textContent=warnings.join(' ');$('#health').hidden=!warnings.length;
   $('#pendingBadge').textContent=status.pendingCount;$('#pendingBadge').hidden=!status.pendingCount;
   const info=$('#deviceInfo');info.replaceChildren();
-  const entries=[['Access Point',status.apSsid],['AP-Adresse',status.apIP],['WLAN-Modus',status.apOnly?'Nur Access Point':'Access Point + WLAN-Client'],['WLAN-Client',status.staConnected?`${status.activeSsid||status.ssid} · ${status.staIP}`:'Nicht verbunden'],['Gerätezeit',displayTime(status.epoch)],['LittleFS',`${Math.round(status.fsUsed/1024)} / ${Math.round(status.fsTotal/1024)} KiB`],['TOF',sensorSummary(status.tofDiagnostics)],['RFID',sensorSummary(status.rfidDiagnostics)]];
+  const entries=[['Access Point',status.apSsid],['AP-Adresse',status.apIP],['WLAN-Modus',status.apOnly?'Nur Access Point':'Access Point + WLAN-Client'],['Gespeicherter Modus',status.configuredApOnly?'Nur Access Point':'Access Point + WLAN-Client'],['WLAN-Client',status.staConnected?`${status.activeSsid||status.ssid} · ${status.staIP}`:'Nicht verbunden'],['Gerätezeit',displayTime(status.epoch)],['LittleFS',`${Math.round(status.fsUsed/1024)} / ${Math.round(status.fsTotal/1024)} KiB`],['TOF',sensorSummary(status.tofDiagnostics)],['RFID',sensorSummary(status.rfidDiagnostics)]];
   for(const [label,value]of entries)info.append(el('dt',label),el('dd',value));
   const url=new URL(location.href);url.port=status.filemanagerPort;url.pathname='/';url.search='';url.hash='';$('#filemanager').href=url.href;
   if(!$('#configForm').dataset.loaded){
@@ -69,13 +69,23 @@ async function loadRegistry(){
 async function refresh(){if(refreshing)return;refreshing=true;try{await loadStatus();await Promise.all([loadReport(),loadHistory()]);}catch(e){$('#dot').classList.remove('ok');$('#connection').textContent='Verbindung prüfen';notify(e.message,true);}finally{refreshing=false;}}
 for(const b of document.querySelectorAll('[data-tab]'))b.addEventListener('click',()=>{for(const t of document.querySelectorAll('.tab'))t.hidden=t.id!==b.dataset.tab;for(const n of document.querySelectorAll('[data-tab]'))n.classList.toggle('active',n===b);});
 $('#personForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;action(f.querySelector('button'),async()=>{await api('person',{name:f.elements.name.value});f.reset();await loadRegistry();await loadReport();notify('Person angelegt. Jetzt einen Chip zuordnen.');});});
+$('#configForm').elements.apOnly.addEventListener('change',async e=>{
+  const checkbox=e.currentTarget,requested=checkbox.checked,button=$('#configForm').querySelector('button');
+  checkbox.disabled=true;button.disabled=true;
+  try {
+    await api('config',{apOnly:requested});
+    notify(requested?'Gespeichert: Nur Access Point. Die WLAN-Client-Verbindung wird jetzt beendet.':'Gespeichert: WLAN-Client wieder freigegeben. Die Suche wartet, solange ein Gerät am ESP-Access-Point angemeldet ist.');
+  } catch(error) {
+    checkbox.checked=!requested;notify('Modus nicht bestätigt: '+error.message+'. Bitte Seite neu laden und gespeicherten Modus prüfen.',true);
+  } finally {checkbox.disabled=false;button.disabled=false;}
+});
 $('#configForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;action(f.querySelector('button'),async()=>{
   const value=Object.fromEntries(new FormData(f));value.apOnly=f.elements.apOnly.checked;
   for(let i=0;i<3;i++)value['clearWifiPassword'+i]=f.elements['clearWifiPassword'+i].checked;
-  await api('config',configPayload(value));
+  const result=await api('config',configPayload(value));
   for(const n of ['wifiPassword0','wifiPassword1','wifiPassword2','apPassword','adminPassword'])f.elements[n].value='';
   for(let i=0;i<3;i++)f.elements['clearWifiPassword'+i].checked=false;
-  notify('Gespeichert. Bitte ESP32 neu starten. Danach gelten WLAN-Modus und Zugänge.');
+  notify(result.restartRequired?'Gespeichert. WLAN-Modus wird sofort übernommen; für geänderte Zugänge oder Kennwörter bitte neu starten.':'Gespeichert. WLAN-Modus wird sofort übernommen.');
 });});
 $('#setTime').addEventListener('click',e=>action(e.currentTarget,async()=>{await api('time',{epoch:Math.floor(Date.now()/1000)});await refresh();notify('Browserzeit übernommen.');}));
 $('#weekSelect').addEventListener('change',()=>loadReport().catch(e=>notify(e.message,true)));$('#monthSelect').addEventListener('change',()=>loadReport().catch(e=>notify(e.message,true)));

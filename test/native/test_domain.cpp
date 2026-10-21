@@ -7,6 +7,16 @@
 #include <cstdlib>
 #include <iostream>
 int main(){
+ cafe::NetworkModeChange modeChange;bool target=false;
+ assert(!modeChange.take(1000,target));modeChange.schedule(true,1000);
+ assert(modeChange.pending());assert(!modeChange.take(1249,target));
+ assert(modeChange.take(1250,target) && target && !modeChange.pending());
+ assert(!modeChange.take(1500,target));
+ modeChange.schedule(true,2000);modeChange.schedule(false,2100);
+ assert(!modeChange.take(2349,target));assert(modeChange.take(2350,target) && !target);
+ modeChange.schedule(true,UINT32_MAX-100);assert(!modeChange.take(148,target));
+ assert(modeChange.take(149,target) && target);
+
  assert(!cafe::mayStartWifiScan(true,0,false,60000));
  assert(!cafe::mayStartWifiScan(false,1,false,60000));
  assert(cafe::mayStartWifiScan(false,0,false,0));

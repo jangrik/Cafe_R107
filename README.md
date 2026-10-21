@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.0.13
+# Cafe R107 · Version 1.0.14
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -6,9 +6,50 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 
 
 **Direkt zu:** [OTA-Update](#firmware-per-ota-aktualisieren) ·
-[HTTP-API](#vollständige-http-api-stand-1013) ·
+[HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.0.14: AP-only sofort und dauerhaft umschalten
+
+Die Checkbox unter **Gerät & WLAN** speichert ihren Modus jetzt bereits beim
+An-/Abwählen. Kein zusätzlicher Speichern-Klick und kein ESP-Neustart erforderlich.
+Nur apOnly wird dabei gespeichert; noch nicht gespeicherte SSIDs/Kennwörter im
+Formular werden nicht mitgesendet. Bei Speicherfehlern wird die Checkbox
+zurückgestellt und eine Fehlermeldung angezeigt.
+
+Nach erfolgreichem Speichern folgt die Umschaltung in der Hauptschleife,
+frühestens 250 ms nach der Anforderung, damit zuerst die HTTP-Antwort gesendet
+werden kann. Aktivieren beendet STA-Verbindung und Scan, stoppt NTP und
+wechselt nach WIFI_AP. Die laufende Uhrzeit und der ESP bleiben erhalten.
+Abwählen aktiviert AP+STA wieder; neue Suchläufe warten wie bisher, solange
+noch ein Gerät am ESP-AP angemeldet ist. Die WLAN-Zugänge bleiben gespeichert.
+**apOnly wird in config.json gespeichert und gilt auch nach Neustart.**
+
+Wurde die Seite über die bisherige Client-IP geöffnet, ist diese nach dem
+Abschalten nicht mehr erreichbar: mit Cafe-R107-… verbinden und
+**http://192.168.4.1/** öffnen. Bei unbekanntem Ausgang einer unterbrochenen
+Anfrage die Seite neu laden und den gespeicherten Modus prüfen.
+
+Die Oberfläche zeigt nun sowohl den aktiven als auch den gespeicherten Modus.
+Andere Änderungen am Formular (WLAN-Zugänge/AP-/Admin-Kennwort) benötigen
+weiterhin einen Neustart. Auch beim normalen Speichern des Formulars wird
+apOnly sofort übernommen; die Antwort erklärt, ob andere Änderungen noch
+einen Neustart erfordern.
+
+**Update von 1.0.13:** git pull, Firmware hochladen, dann über den Dateimanager
+**data/www/app.js → /www/app.js** und
+**data/www/index.html → /www/index.html** einzeln ersetzen. Strg+F5.
+Kein uploadfs und kein Ersetzen der Datendateien. OTA-Anmeldung bleibt wie in 1.0.13.
+
+API: POST /api/config mit **{"apOnly":true}** beziehungsweise false speichert
+und plant die sofortige Umschaltung. Die Antwort ergänzt **modeChangeScheduled**
+und **configuredApOnly**; **restartRequired** ist nur noch true, wenn andere
+geänderte Einstellungen einen Neustart benötigen. GET /api/status ergänzt
+**networkModeChangePending**. Bei einem seltenen Fehler der Radio-Umschaltung
+bleibt apOnly der tatsächlich laufende Modus, configuredApOnly zeigt den
+persistierten Zielmodus; die serielle Meldung mode_change enthält result=failed.
+Ein erneuter Klick/Speichervorgang oder Neustart kann die Übernahme erneut versuchen.
 
 ## Neu in 1.0.13: AP-only, drei WLANs und serielle Diagnose
 
@@ -64,7 +105,7 @@ Kennwort auch für OTA, sobald der ESP neu gestartet wurde.
    aus **data/www/** einzeln ersetzen: **domain.js**, **app.js**, **style.css**,
    zuletzt **index.html**. Danach Browser mit **Strg+F5** neu laden.
 4. Gewünschte WLAN-Einstellungen speichern und den ESP per Reset oder
-   **/api/restart** neu starten. Die Checkbox wirkt erst nach diesem Neustart.
+   **/api/restart** neu starten. Für die Modus-Checkbox ist ab 1.0.14 kein Neustart mehr nötig.
 
 **Kein uploadfs und kein Ersetzen von config.json, registry.json, lastseen.json
 oder journal.ndjson.** Alte config.json-Dateien bleiben lesbar: Die bisherige
@@ -224,7 +265,7 @@ einzeln über den Dateimanager auf Port 8080 ersetzen. Nach dem Neustart muss
 die Uhrzeit erneut per NTP oder Browser gesetzt werden.
 Dieser Abschnitt beschreibt die Einführung von OTA in 1.0.12; die aktuelle Version ist 1.0.13.
 
-## Vollständige HTTP-API (Stand 1.0.13)
+## Vollständige HTTP-API (Stand 1.0.14)
 
 ### Adresse und Anmeldung
 

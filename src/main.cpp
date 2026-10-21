@@ -4,6 +4,8 @@
 #include <VL53L0X.h>
 #include <WiFi.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
+#include <esp_sntp.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "NetworkLogic.h"
@@ -72,6 +74,7 @@ String lastSeenError;
 bool lastSeenWritable=true;
 struct WifiCredential {String ssid,password;};
 struct Config { WifiCredential wifi[3];bool apOnly=false;String apPassword,adminPassword; } cfg,savedCfg;
+cafe::NetworkModeChange networkModeChange;
 bool validConfig(const Config& c) {
   if(c.apPassword.length()<8 || c.apPassword.length()>63 ||
       c.adminPassword.length()<8 || c.adminPassword.length()>63)return false;
@@ -911,8 +914,15 @@ void apiConfig() {
   if(!validConfig(cfg)) {reject();return;}
   if(!saveConfig()){cfg=old;error(507,"Konfiguration nicht gespeichert");return;}
   savedCfg=cfg;
-  JsonDocument out;out["ok"]=true;out["restartRequired"]=true;sendJson(out);
-  // Apply after restart: don't interrupt the HTTP response/AP or change active auth mid-request.
+  bool restartRequired=cfg.apPassword!=old.apPassword || cfg.adminPassword!=old.adminPassword;
+  for(unsigned i=0;i<3;++i)if(cfg.wifi[i].ssid!=old.wifi[i].ssid ||
+      cfg.wifi[i].password!=old.wifi[i].password)restartRequired=true;
+  bool modeScheduled=cfg.apOnly!=old.apOnly || networkModeChange.pending();
+  if(modeScheduled)networkModeChange.schedule(cfg.apOnly,millis());
+  JsonDocument out;out["ok"]=true;out["restartRequired"]=restartRequired;
+  out["modeChangeScheduled"]=modeScheduled;out["configuredApOnly"]=cfg.apOnly;sendJson(out);
+  // Passwords and WLAN profiles still apply after reboot. Mode changes follow
+  // asynchronously, after this HTTP response, without changing time or AP credentials.
   cfg=old;
 }
 void apiExport() {
@@ -1019,12 +1029,25 @@ void networkStatusJson(JsonDocument& d) {
   auto networks=d["wifiNetworks"].to<JsonArray>();
   // Saved settings, not runtime settings: permit several saves before reboot.
   d["configuredApOnly"]=savedCfg.apOnly;
+  d["networkModeChangePending"]=networkModeChange.pending();
   for(const auto& n:savedCfg.wifi) {
     auto o=networks.add<JsonObject>();o["ssid"]=n.ssid;o["hasPassword"]=n.password.length()>0;
   }
 }
 void serviceNetwork() {
   uint32_t now=millis();NetworkEvent event;
+  bool requestedMode;
+  if(networkModeChange.take(now,requestedMode) && requestedMode!=cfg.apOnly) {
+    if(networkScanning)esp_wifi_scan_stop();
+    WiFi.scanDelete();networkScanning=false;networkConnecting=false;
+    WiFi.disconnect(false,false);WiFi.setAutoReconnect(false);
+    if(requestedMode) {sntp_stop();ntpStarted=false;}
+    bool switched=WiFi.mode(requestedMode?WIFI_AP:WIFI_AP_STA);
+    if(switched)cfg.apOnly=requestedMode;
+    networkTried=false;networkAttemptedSlots=0;networkScanAt=now;
+    Serial.printf("[WIFI %lu ms] mode_change requested=%s result=%s active=%s\n",
+      (unsigned long)now,requestedMode?"AP_ONLY":"AP_STA",switched?"ok":"failed",cfg.apOnly?"AP_ONLY":"AP_STA");
+  }
   while(networkEvents && xQueueReceive(networkEvents,&event,0)==pdTRUE) {
     Serial.printf("[WIFI %lu ms] %s",(unsigned long)event.at,WiFi.eventName(event.id));
     if(event.id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED)

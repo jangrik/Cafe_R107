@@ -28,3 +28,27 @@ test('turning AP-only off retains the saved SSIDs',()=>{
   const before=configPayload(form);form.apOnly=false;const after=configPayload(form);
   assert.deepEqual(after.wifiNetworks,before.wifiNetworks);assert.equal(after.apOnly,false);
 });
+
+// Exercise the actual UI handler: the checkbox must save without form submission.
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+function modeHandler(api) {
+  const script=readFileSync(new URL('../data/www/app.js',import.meta.url),'utf8');
+  const start=script.indexOf("$('#configForm').elements.apOnly.addEventListener('change'");
+  const end=script.indexOf("$('#configForm').addEventListener('submit'",start);
+  let callback;const checkbox={checked:true,disabled:false,addEventListener:(event,fn)=>{assert.equal(event,'change');callback=fn;}};
+  const button={disabled:false};
+  const form={elements:{apOnly:checkbox},querySelector:()=>button};
+  vm.runInNewContext(script.slice(start,end),{$:()=>form,api,notify:()=>{}});
+  return {checkbox,button,run:()=>callback({currentTarget:checkbox})};
+}
+test('AP-only checkbox immediately saves only its mode without submitting WLAN edits',async()=>{
+  const calls=[];const h=modeHandler(async(path,payload)=>{calls.push({path,apOnly:payload.apOnly,keys:Object.keys(payload)});assert.equal(h.checkbox.disabled,true);});
+  await h.run();assert.deepEqual(calls,[{path:'config',apOnly:true,keys:['apOnly']}]);
+  assert.equal(h.checkbox.disabled,false);assert.equal(h.button.disabled,false);
+  h.checkbox.checked=false;await h.run();assert.equal(calls[1].apOnly,false);
+});
+test('failed mode save restores checkbox and releases controls',async()=>{
+  const h=modeHandler(async()=>{throw new Error('507');});
+  await h.run();assert.equal(h.checkbox.checked,false);assert.equal(h.checkbox.disabled,false);assert.equal(h.button.disabled,false);
+});
