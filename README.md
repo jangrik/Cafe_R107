@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.0.15
+# Cafe R107 · Version 1.0.16
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,32 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.0.16: TOP-Zyklus gegen kurze TOF-Aussetzer stabilisieren
+
+Ein einzelner ungültiger oder veralteter Messwert hat bisher die Rangliste
+sofort beendet und den Zyklus auf Heute zurückgesetzt. Das konnte auch durch
+eine verzögerte Hauptschleife nach HTTP-/Dateizugriffen ausgelöst werden.
+
+Die Rangliste überbrückt jetzt **700 ms ohne frischen Nahwert**. Währenddessen
+laufen Seitenfolge und Zehn-Sekunden-Timer unverändert weiter, auch wenn eine
+Unterbrechung genau auf den Seitenwechsel fällt. Erst nach dauerhaft fehlendem
+Nahwert endet die Anzeige; der nächste Handkontakt beginnt wieder mit Heute.
+Die 120-mm-Einschaltschwelle bleibt unverändert. Zusammen mit der vorhandenen
+Messwert-Frische von höchstens 500 ms kann das Ende nach komplett ausbleibenden
+Sensormessungen bis etwa 1,2 Sekunden nach der letzten Nahmessung erfolgen.
+
+Vor der Anzeigeentscheidung wird der TOF nochmals nichtblockierend abgefragt,
+falls vorher Webserver/Dateimanager die Schleife verzögert haben.
+GET /api/status ergänzt **rankingActive** und **rankingPeriod**
+(today, month, all; bei inaktiver Anzeige der zurückgesetzte Wert today).
+Das hilft, den Zyklus während eines Dauertests zu beobachten.
+
+**Update:** git pull und nur Firmware hochladen. Keine Website-Dateien und
+kein LittleFS-Upload. OTA-Datei und bisherige Einstellungen bleiben unverändert.
+Tests decken ausdrücklich einen kurzen Aussetzer am Zehn-Sekunden-Wechsel,
+fortgesetzte Seitenfolge, tatsächliches Entfernen und millis-Überlauf ab.
+Ein Sensor-Dauertest am realen Gerät steht noch aus.
 
 ## Neu in 1.0.15: TOP-Seiten per Hand und lokale OTA-Datei
 

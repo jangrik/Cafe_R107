@@ -7,19 +7,24 @@ namespace cafe {
 enum class RankingPeriod : uint8_t { Today, Month, All };
 constexpr uint32_t RANKING_PAGE_MS=10000;
 constexpr uint16_t RANKING_HAND_MM=120;
+constexpr uint32_t RANKING_RELEASE_MS=700;
 inline bool rankingHand(bool freshValid,uint16_t mm) {
   return freshValid && mm>=20 && mm<RANKING_HAND_MM;
 }
 class RankingCycle {
-  uint32_t pageAt_=0;
+  uint32_t pageAt_=0,lastNearAt_=0;
   bool active_=false;
   RankingPeriod period_=RankingPeriod::Today;
 public:
-  void reset(uint32_t now) {pageAt_=now;active_=false;period_=RankingPeriod::Today;}
+  void reset(uint32_t now) {pageAt_=now;lastNearAt_=now;active_=false;period_=RankingPeriod::Today;}
   bool active() const {return active_;}
   RankingPeriod period() const {return period_;}
   bool update(bool hand,uint32_t now) {
-    if(!hand) {bool changed=active_;reset(now);return changed;}
+    if(hand)lastNearAt_=now;
+    // Keep both the page and its timer through short sensor/loop gaps.
+    if(!hand && (!active_ || uint32_t(now-lastNearAt_)>=RANKING_RELEASE_MS)) {
+      bool changed=active_;reset(now);return changed;
+    }
     if(!active_) {active_=true;period_=RankingPeriod::Today;pageAt_=now;return true;}
     if(uint32_t(now-pageAt_)<RANKING_PAGE_MS)return false;
     period_=period_==RankingPeriod::Today?RankingPeriod::Month:

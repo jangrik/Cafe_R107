@@ -581,6 +581,9 @@ void rankingScreen(cafe::RankingPeriod period) {
   currentScreen=Screen::Ranking; displayAt=millis();
 }
 void serviceDisplay() {
+  // HTTP/filemanager work before this call can outlive the sample freshness window.
+  // Poll a ready sample again before deciding whether the hand has disappeared.
+  serviceTof();
   uint32_t now=millis();
   bool fresh=cafe::freshTofSample(tofOK,tofHasSample,tofSampleValid,uint32_t(now-lastTofResult));
   bool hand=cafe::rankingHand(fresh,tofDistance);
@@ -770,6 +773,9 @@ void apiRestart() {
 void networkStatusJson(JsonDocument& d);
 void apiStatus() {
   if(!auth()) return; JsonDocument d;
+  d["rankingActive"]=rankingCycle.active();
+  d["rankingPeriod"]=rankingCycle.period()==cafe::RankingPeriod::Today?"today":
+      rankingCycle.period()==cafe::RankingPeriod::Month?"month":"all";
   d["backlightOn"]=backlightOn;d["backlightMode"]=backlightTimer.modeName();d["tofOK"]=tofOK;
   d["distanceMm"]=tofDistance;d["presence"]=presenceGate.present();
   d["lastSeenRevision"]=lastSeenSequence;d["lastSeenError"]=lastSeenError;

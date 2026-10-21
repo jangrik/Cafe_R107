@@ -87,11 +87,24 @@ int main(){
  assert(!cycle.update(true,71999));assert(cycle.update(true,72000) && cycle.period()==P::Month);
  assert(cycle.update(true,82000) && cycle.period()==P::All);
  assert(cycle.update(true,92000) && cycle.period()==P::Today);
- assert(cycle.update(false,92001) && !cycle.active());
+ assert(!cycle.update(false,92001) && cycle.active());
+ assert(!cycle.update(false,92699) && cycle.active());
+ assert(cycle.update(false,92700) && !cycle.active());
  assert(cycle.update(true,93000) && cycle.period()==P::Today);
- assert(cycle.update(false,93001)); // invalid/stale sample removes the hand
+ assert(!cycle.update(false,93001));
+ assert(cycle.update(false,93700)); // sustained removal ends the gesture
  cycle.reset(UINT32_MAX-1000);assert(cycle.update(true,UINT32_MAX-1000));
  assert(!cycle.update(true,8998));assert(cycle.update(true,8999) && cycle.period()==P::Month);
+ // A brief dropout exactly at the 10-second transition must not restart Today.
+ cycle.reset(0);assert(cycle.update(true,0));assert(!cycle.update(true,9900));
+ assert(cycle.update(false,10000) && cycle.period()==P::Month);
+ assert(!cycle.update(true,10100) && cycle.period()==P::Month);
+ assert(!cycle.update(true,19900));assert(cycle.update(false,20000) && cycle.period()==P::All);
+ assert(!cycle.update(true,20100));assert(!cycle.update(true,29900));
+ assert(cycle.update(false,30000) && cycle.period()==P::Today);
+ // Release and page timing both survive millis rollover.
+ cycle.reset(UINT32_MAX-100);assert(cycle.update(true,UINT32_MAX-100));
+ assert(!cycle.update(false,598));assert(cycle.update(false,599) && !cycle.active());
  // Lighting: exact ten-minute cutoff and 30-second proximity grant.
  cafe::BacklightTimer light;light.reset(1000);
  assert(light.on(600999));assert(!light.on(601000));
