@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.0.16
+# Cafe R107 · Version 1.0.17
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,80 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.0.17: TOF-Qualitätsdiagnose für falsche Nahwerte
+
+Diese Diagnoseversion ergänzt **GET /api/tof** um **rawDistanceMm** und ein
+Objekt **quality**. Sie ändert bewusst noch keine Grenzwerte und verwirft noch
+keine Messungen anhand der Signalqualität. **valid** verwendet weiterhin die
+bestehende Transport-, Frische- und 20–2000-mm-Prüfung; ein falscher Nahwert
+kann die TOP-Anzeige daher weiterhin auslösen. Die Messwerte dienen zuerst
+zum Vergleich der Fenstersituation ohne Hand mit einer echten Hand bei ca. 100 mm.
+
+### Neue Felder
+
+| Feld | Bedeutung |
+|---|---|
+| rawDistanceMm | Ungefilterte Entfernung des zuletzt vollständig gelesenen Ergebnisblocks, auch außerhalb 20–2000 mm; bei fehlendem/fehlerhaftem Block null |
+| quality.readOK | Letzter gelesener Ergebnisblock war vollständig (12 Bytes); kein Urteil über Messqualität oder erfolgreiche Interruptquittierung |
+| quality.readStatus | Wire-EndTransmission-Status; 254 ist der Anwendungscode für einen unvollständigen Ergebnisblock |
+| quality.ageMs / fresh | Alter des Ergebnisblocks in ms / höchstens 500 ms alt |
+| quality.deviceStatusRaw | Vollständiges Statusregisterbyte |
+| quality.deviceStatusCode | Geräte-Code aus Bits 6:3 des Statusbytes |
+| quality.deviceStatusName | Einordnung des Geräte-Codes, siehe unten |
+| quality.deviceRangeComplete | Geräte-Code ist 11 (range_complete); keine vollständige ST-Qualitätsfreigabe |
+| quality.signalRateMcps | Rücksignal, Millionen Zählimpulse pro Sekunde |
+| quality.ambientRateMcps | Umgebungslichtsignal, gleiche Einheit |
+| quality.effectiveSpads | Effektive Zahl der verwendeten Detektorzellen (SPADs), einschließlich Bruchteil |
+| quality.signalToAmbientRatio | Rücksignal geteilt durch Umgebungslichtsignal; null bei Ambient=0; kein berechnetes statistisches SNR |
+| quality.deviceStatusCounts | Array mit 16 Zählern, Index = Geräte-Code; seit ESP-Start, ohne Zurücksetzen bei Sensor-Reinitialisierung |
+| quality.statusSource | raw_device_register |
+| quality.qualityChecksApplied | false: Die Diagnose verändert die Akzeptanz der Entfernung noch nicht |
+| quality.hostSigmaComputed | false: Die vollständige Host-Sigma-Schätzung der ST-API wird hier nicht berechnet |
+
+Codes 1/2/3 heißen hardware_failure, 4 signal_failure, 6/9 phase_failure,
+8/10 minimum_range_failure, 11 range_complete. Andere Codes werden als
+no_classified_range bezeichnet. **Diese Rohcodes sind nicht die RangeStatus-
+Nummern der vollständigen ST-API** (dort bedeutet beispielsweise 0 gültig).
+Auch bei Code 11 kann eine vollständige Host-Qualitätsprüfung noch Fehler melden.
+Es wird deshalb kein erfundener Sigma-Wert oder pauschaler Grenzwert ausgegeben.
+
+Vor dem ersten Ergebnisblock und nach einem fehlgeschlagenen Blocklesen sind
+rawDistanceMm und die Ergebnisfelder null; fresh ist false. Nach älteren
+Ergebnisblöcken können Werte weiter sichtbar sein: ageMs/fresh beachten.
+Die bisherigen Diagnosefelder und ageMs auf der obersten Ebene bleiben erhalten.
+Ein Qualitätsproblem oder ein Ziel außerhalb der Reichweite ist allein kein
+I2C-Stillstand und löst deshalb keinen automatischen Reset aus.
+
+Entfernung und Qualität kommen aus **demselben 12-Byte-Ergebnisblock ab 0x14**,
+der vor dem Löschen des Messinterrupts gelesen wird. Es wird keine zusätzliche
+Einzelmessung gestartet. Unvollständige I2C-Antworten werden als Transportfehler
+behandelt. Das Layout und die Geräte-Code-Einordnung folgen der ST-Implementierung
+von GetRangingMeasurementData/get_pal_range_status; die verwendete Pololu-
+Bibliothek las bisher lediglich das Entfernungswort aus diesem Block.
+
+Referenzen:
+
+- [ST VL53L0X API-Handbuch UM2039](https://www.st.com/resource/en/user_manual/um2039-world-smallest-timeofflight-ranging-and-gesture-detection-sensor-application-programming-interface-stmicroelectronics.pdf)
+- [ST-API in Adafruits Treiber: Ergebnisblock](https://github.com/adafruit/Adafruit_VL53L0X/blob/master/src/core/src/vl53l0x_api.cpp)
+- [ST-API: Geräte-Status und Host-Qualitätsprüfung](https://github.com/adafruit/Adafruit_VL53L0X/blob/master/src/core/src/vl53l0x_api_core.cpp)
+
+### Vergleich am Gerät
+
+1. Firmware aktualisieren; **keine Website-Dateien und kein uploadfs** erforderlich.
+2. Ohne Hand in der problematischen Fensterausrichtung **/api/tof** mehrmals
+   öffnen und vollständige JSON-Antworten sichern, besonders bei falschen ~100 mm.
+3. Mit echter Hand bei ca. 100 mm ebenso mehrere Antworten sichern, möglichst
+   direkt anschließend bei denselben Lichtverhältnissen.
+4. Optional seriell bei 115200 Baud mitlesen: Bei laufenden Messungen erscheint
+   höchstens einmal pro Sekunde eine **[TOF … ms]**-Zeile mit Rohentfernung,
+   Geräte-Status, Signal, Ambient, SPADs und distanceAccepted.
+
+Die neue Zeile enthält keine Kennwörter. Vor dem Teilen eines vollständigen
+seriellen Logs die bisherige Startausgabe mit AP-/Admin-Kennwörtern entfernen.
+Erst anhand des Vergleichs lassen sich passende Qualitätsfilter beurteilen.
+Ein dauerhaft als gut gemeldeter falscher Nahwert kann mit den Rohwerten allein
+unter Umständen weiterhin nicht von einer Hand unterschieden werden.
 
 ## Neu in 1.0.16: TOP-Zyklus gegen kurze TOF-Aussetzer stabilisieren
 
