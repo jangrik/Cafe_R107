@@ -1,4 +1,5 @@
 #include "Domain.h"
+#include "TofQuality.h"
 #include "NetworkLogic.h"
 #include "DisplayLogic.h"
 #include "Backlight.h"
@@ -7,6 +8,17 @@
 #include <cstdlib>
 #include <iostream>
 int main(){
+ // Decode the real ST result-block layout, including fractional rates/SPADs.
+ const uint8_t resultBlock[12]={0x5f,0,0x12,0x80,0,0,0x01,0x40,0x00,0x20,0x01,0x2c};
+ auto quality=cafe::TofQuality::decode(resultBlock);
+ assert(quality.deviceStatus()==11 && quality.deviceRangeComplete());
+ assert(quality.distanceMm==300 && quality.effectiveSpads()==18.5f);
+ assert(quality.signalRateMcps()==2.5f && quality.ambientRateMcps()==0.25f);
+ quality.statusRaw=4<<3;assert(!quality.deviceRangeComplete());
+ assert(std::string(quality.deviceStatusName())=="signal_failure");
+ quality.statusRaw=9<<3;assert(std::string(quality.deviceStatusName())=="phase_failure");
+ quality.statusRaw=0;assert(std::string(quality.deviceStatusName())=="no_classified_range");
+
  cafe::NetworkModeChange modeChange;bool target=false;
  assert(!modeChange.take(1000,target));modeChange.schedule(true,1000);
  assert(modeChange.pending());assert(!modeChange.take(1249,target));

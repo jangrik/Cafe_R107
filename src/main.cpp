@@ -27,6 +27,7 @@
 #include "DisplayLogic.h"
 #include "Backlight.h"
 #include "HealthLogic.h"
+#include "TofQuality.h"
 #include <ArduinoOTA.h>
 
 namespace pins {
@@ -99,6 +100,11 @@ cafe::RankingCycle rankingCycle;
 cafe::BacklightTimer backlightTimer;
 cafe::PresenceGate presenceGate;
 VL53L0X tof;
+cafe::TofQuality tofQuality;
+bool tofQualityReadOK=false;
+uint8_t tofQualityReadStatus=0;
+uint32_t tofQualityAt=0,tofQualityLogAt=0;
+uint32_t tofDeviceStatusCounts[16]={};
 bool backlightOn=true, tofOK=false;
 bool tofHasSample=false,tofSampleValid=false;
 cafe::RestartRequest restartRequest;
@@ -114,7 +120,7 @@ void serviceBacklight() {
 }
 void setupTof(bool hardwareReset=false) {
   bool wasInitialized=tofOK;
-  tofOK=false;tofSampleValid=false;tofDistance=0;
+  tofOK=false;tofSampleValid=false;tofDistance=0;tofQualityReadOK=false;
   tofInitError="";tofInitTimeout=false;tofInitStage="bus_begin";
   presenceGate=cafe::PresenceGate();
   Wire.end();
@@ -162,6 +168,23 @@ void setupTof(bool hardwareReset=false) {
   tofDiagnostics.healthy=false;tofDiagnostics.error="waiting_for_measurement";
   Serial.println("VL53L0X bereit (SDA16/SCL17, XSHUT4, Naehe 80 cm)");
 }
+bool readTofQuality() {
+  tofQualityReadOK=false;
+  uint8_t data[12]={};
+  Wire.beginTransmission(0x29);Wire.write(uint8_t(VL53L0X::RESULT_RANGE_STATUS));
+  tofQualityReadStatus=Wire.endTransmission(false);
+  if(tofQualityReadStatus!=0)return false;
+  size_t received=Wire.requestFrom(uint8_t(0x29),uint8_t(sizeof(data)));
+  if(received!=sizeof(data) || Wire.available()!=int(sizeof(data))) {
+    while(Wire.available())Wire.read();
+    tofQualityReadStatus=254; // Application code: incomplete result block.
+    return false;
+  }
+  for(auto& b:data)b=Wire.read();
+  tofQuality=cafe::TofQuality::decode(data);tofQualityAt=millis();
+  tofQualityReadOK=true;++tofDeviceStatusCounts[tofQuality.deviceStatus()];
+  return true;
+}
 void serviceTof() {
   uint32_t now=millis();
   if(!tofOK || uint32_t(now-lastTofPoll)<100)return;
@@ -170,10 +193,15 @@ void serviceTof() {
   tofLastI2cStatus=tof.last_status;
   bool valid=false;uint16_t mm=0;
   if(tof.last_status==0 && (ready&0x07)) {
-    // Read only a completed continuous measurement, never start/wait for a shot.
-    mm=tof.readRangeContinuousMillimeters();
-    tofLastI2cStatus=tof.last_status;
+    // Read all result fields from the same ready measurement before clearing
+    // its interrupt. The 12-byte block matches ST GetRangingMeasurementData.
+    bool blockOK=readTofQuality();
+    mm=blockOK?tofQuality.distanceMm:0;
+    tof.writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR,0x01);
+    tofLastI2cStatus=blockOK?tof.last_status:tofQualityReadStatus;
     bool transportOK=!tof.timeoutOccurred() && tofLastI2cStatus==0;
+    // Diagnostic release: retain the existing distance-only acceptance rule.
+    // A device status is NOT the full host-computed ST RangeStatus.
     valid=transportOK && mm>=20 && mm<=2000;
     tofDistance=valid?mm:0;tofSampleValid=valid;
     if(transportOK) {
@@ -181,6 +209,12 @@ void serviceTof() {
       if(tofRecovery.measurement())++tofDiagnostics.successes;
       tofFaultActive=false;tofInitStage="running";
       tofDiagnostics.healthy=true;tofDiagnostics.error="";
+      if(uint32_t(now-tofQualityLogAt)>=1000) {
+        tofQualityLogAt=now;
+        Serial.printf("[TOF %lu ms] rawMm=%u deviceStatus=%u (%s) signalMcps=%.4f ambientMcps=%.4f spads=%.2f distanceAccepted=%u\n",
+          (unsigned long)now,tofQuality.distanceMm,tofQuality.deviceStatus(),tofQuality.deviceStatusName(),
+          tofQuality.signalRateMcps(),tofQuality.ambientRateMcps(),tofQuality.effectiveSpads(),valid);
+      }
     } else {
       tofDiagnostics.healthy=false;tofDiagnostics.error="i2c_measurement_error";
     }
@@ -753,6 +787,28 @@ void apiDiagnostics() {
   d["checkIntervalMs"]=cafe::HEALTH_INTERVAL_MS;d["tofStallMs"]=cafe::TOF_STALL_MS;sendJson(d);
 }
 
+void tofQualityJson(JsonDocument& d) {
+  auto q=d["quality"].to<JsonObject>();
+  q["readOK"]=tofQualityReadOK;q["readStatus"]=tofQualityReadStatus;
+  q["qualityChecksApplied"]=false;q["hostSigmaComputed"]=false;
+  q["statusSource"]="raw_device_register";
+  auto counts=q["deviceStatusCounts"].to<JsonArray>();
+  for(auto count:tofDeviceStatusCounts)counts.add(count);
+  if(!tofQualityReadOK) {
+    d["rawDistanceMm"]=nullptr;
+    for(const char* key:{"ageMs","deviceStatusRaw","deviceStatusCode","deviceStatusName",
+        "deviceRangeComplete","signalRateMcps","ambientRateMcps","effectiveSpads","signalToAmbientRatio"})q[key]=nullptr;
+    q["fresh"]=false;return;
+  }
+  uint32_t age=uint32_t(millis()-tofQualityAt);
+  d["rawDistanceMm"]=tofQuality.distanceMm;q["ageMs"]=age;q["fresh"]=age<=500;
+  q["deviceStatusRaw"]=tofQuality.statusRaw;q["deviceStatusCode"]=tofQuality.deviceStatus();
+  q["deviceStatusName"]=tofQuality.deviceStatusName();q["deviceRangeComplete"]=tofQuality.deviceRangeComplete();
+  q["signalRateMcps"]=tofQuality.signalRateMcps();q["ambientRateMcps"]=tofQuality.ambientRateMcps();
+  q["effectiveSpads"]=tofQuality.effectiveSpads();
+  if(tofQuality.ambientRaw)q["signalToAmbientRatio"]=float(tofQuality.signalRaw)/tofQuality.ambientRaw;
+  else q["signalToAmbientRatio"]=nullptr;
+}
 void apiTof() {
   if(!auth())return;
   uint32_t age=uint32_t(millis()-lastTofResult);
@@ -760,7 +816,7 @@ void apiTof() {
   JsonDocument d;d["available"]=tofOK;d["valid"]=valid;
   if(valid)d["distanceMm"]=tofDistance;else d["distanceMm"]=nullptr;
   if(tofHasSample)d["ageMs"]=age;else d["ageMs"]=nullptr;
-  d["presence"]=presenceGate.present();tofDiagnosticJson(d["diagnostics"].to<JsonObject>());sendJson(d);
+  d["presence"]=presenceGate.present();tofDiagnosticJson(d["diagnostics"].to<JsonObject>());tofQualityJson(d);sendJson(d);
 }
 void apiRestart() {
   if(!auth(web.method()==HTTP_POST))return;
