@@ -4,7 +4,7 @@
 
 namespace cafe {
 constexpr uint32_t BACKLIGHT_IDLE_MS=10UL*60UL*1000UL;
-constexpr uint32_t PROXIMITY_WAKE_MS=30000;
+constexpr uint32_t PROXIMITY_WAKE_MS=120000;
 constexpr uint16_t PRESENCE_NEAR_MM=800, PRESENCE_FAR_MM=1100;
 
 // Proximity grants a short look at the display; only chip contacts reset the

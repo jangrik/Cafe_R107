@@ -5,7 +5,7 @@
 
 namespace cafe {
 enum class RankingPeriod : uint8_t { Today, Month, All };
-constexpr uint32_t RANKING_PAGE_MS=10000;
+constexpr uint32_t RANKING_PAGE_MS=3000;
 constexpr uint16_t RANKING_HAND_MM=120;
 constexpr uint32_t RANKING_RELEASE_MS=700;
 inline bool rankingHand(bool freshValid,uint16_t mm) {
