@@ -27,6 +27,22 @@ async function loadStatus(){
   const info=$('#deviceInfo');info.replaceChildren();
   const entries=[['Access Point',status.apSsid],['AP-Adresse',status.apIP],['WLAN-Modus',status.apOnly?'Nur Access Point':'Access Point + WLAN-Client'],['Gespeicherter Modus',status.configuredApOnly?'Nur Access Point':'Access Point + WLAN-Client'],['WLAN-Client',status.staConnected?`${status.activeSsid||status.ssid} · ${status.staIP}`:'Nicht verbunden'],['Gerätezeit',displayTime(status.epoch)],['LittleFS',`${Math.round(status.fsUsed/1024)} / ${Math.round(status.fsTotal/1024)} KiB`],['TOF',sensorSummary(status.tofDiagnostics)],['RFID',sensorSummary(status.rfidDiagnostics)]];
   for(const [label,value]of entries)info.append(el('dt',label),el('dd',value));
+  const clients=$('#apClientList');clients.replaceChildren();
+  for(const client of status.apClientList||[]){
+    const row=el('tr');row.append(el('td',client.shelly?'Shelly':'WLAN-Client'),el('td',client.mac));
+    const cell=el('td');
+    if(client.ip && client.ip!=='0.0.0.0'){
+      const link=el('a',client.ip);link.href='http://'+client.ip+'/';link.target='_blank';link.rel='noopener';cell.append(link);
+    }else cell.textContent='IP noch nicht bekannt';
+    row.append(cell);clients.append(row);
+  }
+  if(!status.apClientList?.length)empty(clients,'Keine AP-Clients verbunden.',3);
+  const shelly=status.shelly||{};
+  $('#shellyKey').textContent=shelly.key||'Nicht verfügbar';
+  $('#shellyStatus').textContent=(shelly.online?'Erkennung aktiv':'Sofortbuchung per Chip aktiv')
+    +(shelly.device?' · '+shelly.device:'')+(shelly.state?' · '+shelly.state:'')
+    +(shelly.online?' · '+Math.round(shelly.power||0)+' W':'')
+    +(shelly.error?' · '+shelly.error:'')+' · Offene Bezüge: '+(shelly.openBrews||0);
   const url=new URL(location.href);url.port=status.filemanagerPort;url.pathname='/';url.search='';url.hash='';$('#filemanager').href=url.href;
   if(!$('#configForm').dataset.loaded){
     const f=$('#configForm');f.elements.apOnly.checked=status.configuredApOnly??status.apOnly??false;
@@ -57,7 +73,7 @@ async function loadHistory(){
   if(!d.rows.length)empty(target,'Noch keine Buchungen.',4);$('#older').hidden=!d.more;
 }
 function personSelect(current){const s=el('select');s.setAttribute('aria-label','Person zuordnen');const blank=el('option','Person auswählen …');blank.value='';s.append(blank);for(const p of registry.people){const o=el('option',p.name);o.value=p.id;s.append(o);}s.value=current||'';return s;}
-function chipRow(uid,person,unknown=false){const row=el('div',undefined,'editrow');const identity=el('div',undefined,'chipidentity');identity.append(el('code',uid),el('small',displayChipTime(registry.lastSeen?.[uid]),'chiptime'));row.append(identity);const select=personSelect(person);row.append(select);const assign=el('button',unknown?'Zuordnen':'Ändern');assign.type='button';assign.addEventListener('click',()=>action(assign,async()=>{if(!select.value)throw new Error('Bitte eine Person auswählen.');await api('assign',{uid,person:select.value});await loadRegistry();await refresh();notify('Chip zugeordnet. Der nächste Chipkontakt bucht einen Kaffee.');}));row.append(assign);const forget=el('button',unknown?'Verwerfen':'Entfernen','secondary');forget.type='button';forget.addEventListener('click',()=>action(forget,async()=>{if(!confirm('Chip-Zuordnung entfernen? Alte Buchungen bleiben erhalten.'))return;await api('forget',{uid});await loadRegistry();notify('Chip entfernt.');}));row.append(forget);return row;}
+function chipRow(uid,person,unknown=false){const row=el('div',undefined,'editrow');const identity=el('div',undefined,'chipidentity');identity.append(el('code',uid),el('small',displayChipTime(registry.lastSeen?.[uid]),'chiptime'));row.append(identity);const select=personSelect(person);row.append(select);const assign=el('button',unknown?'Zuordnen':'Ändern');assign.type='button';assign.addEventListener('click',()=>action(assign,async()=>{if(!select.value)throw new Error('Bitte eine Person auswählen.');await api('assign',{uid,person:select.value});await loadRegistry();await refresh();notify('Chip zugeordnet. Der nächste Chipkontakt wird für die Kaffeeerfassung verwendet.');}));row.append(assign);const forget=el('button',unknown?'Verwerfen':'Entfernen','secondary');forget.type='button';forget.addEventListener('click',()=>action(forget,async()=>{if(!confirm('Chip-Zuordnung entfernen? Alte Buchungen bleiben erhalten.'))return;await api('forget',{uid});await loadRegistry();notify('Chip entfernt.');}));row.append(forget);return row;}
 async function loadRegistry(){
   registry=await api('registry');const p=$('#pending'),c=$('#cardList'),list=$('#personList');p.replaceChildren();c.replaceChildren();list.replaceChildren();
   if(!registry.pending.length)p.append(el('p','Keine neuen Chips. Zum Anlernen einen Chip vorhalten.','hint'));
@@ -74,7 +90,7 @@ $('#configForm').elements.apOnly.addEventListener('change',async e=>{
   checkbox.disabled=true;button.disabled=true;
   try {
     await api('config',{apOnly:requested});
-    notify(requested?'Gespeichert: Nur Access Point. Die WLAN-Client-Verbindung wird jetzt beendet.':'Gespeichert: WLAN-Client wieder freigegeben. Die Suche wartet, solange ein Gerät am ESP-Access-Point angemeldet ist.');
+    notify(requested?'Gespeichert: Nur Access Point. Die WLAN-Client-Verbindung wird jetzt beendet.':'Gespeichert: WLAN-Client wieder freigegeben. Die WLAN-Verbindung wird auch bei verbundenen AP-Clients wiederhergestellt.');
   } catch(error) {
     checkbox.checked=!requested;notify('Modus nicht bestätigt: '+error.message+'. Bitte Seite neu laden und gespeicherten Modus prüfen.',true);
   } finally {checkbox.disabled=false;button.disabled=false;}

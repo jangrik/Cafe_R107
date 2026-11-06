@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.0.17
+# Cafe R107 · Version 1.1.0
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,110 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.1.0
+
+Die Philips-EP0800-Erkennung läuft auf einem Shelly Plug M Gen3 oder Plug S Gen3.
+Das Skript steht in [shelly/coffee-detector.js](shelly/coffee-detector.js).
+Es erkennt einen Mahlabschnitt mit anschließender Brühphase. Die ersten
+Schwellen stammen aus zwei Messreihen mit insgesamt zwei Kaffees und zwei
+Heißwasserbezügen. Sie sind ein Ausgangspunkt für den Praxistest. Ein Bezug
+mit vorgemahlenem Kaffee hat kein Mahlmuster und wird damit nicht erkannt.
+
+### Installation
+
+1. Das gesamte LittleFS über den Dateimanager sichern, insbesondere
+   config.json, registry.json, lastseen.json und journal.ndjson.
+2. Firmware 1.1.0 über PlatformIO bauen und hochladen.
+3. Die beiden Dateien data/www/app.js und data/www/index.html über den
+   Dateimanager einzeln nach /www/app.js und /www/index.html hochladen.
+   Anschließend die Browserseite vollständig neu laden.
+4. Den Shelly als Client ausschließlich mit dem ESP-WLAN verbinden.
+   Matter deaktivieren. Das bisherige Messskript stoppen und dessen Autostart
+   ausschalten. Ein neues Skript mit coffee-detector.js anlegen.
+5. In der ESP-Website unter „Gerät & WLAN“ den Shelly-Schlüssel ablesen
+   und im Skript als API_KEY eintragen. ESP_URL ist standardmäßig
+   http://192.168.4.1/api/shelly und muss zur AP-Adresse passen.
+6. Das Skript speichern, starten und „Run on startup“ aktivieren.
+   Die ESP-Website muss „Erkennung aktiv“ zeigen.
+   /script/<id>/status auf dem Shelly zeigt Zustand, Leistung und Puffer.
+
+Ein vollständiges Dateisystem-Image überschreibt Gerätedaten. Für dieses
+Update sind einzelne Webdateien vorgesehen. Ältere Firmware versteht den
+neuen Journaltyp brew nicht. Ein Downgrade erfordert die passende Sicherung.
+
+### Zuordnung und akustische Erinnerung
+
+Das Skript sendet alle fünf Sekunden ein authentifiziertes Lebenszeichen.
+Nach mehr als 15 Sekunden ohne gesundes Lebenszeichen bucht ein bekannter
+Chip sofort einen Kaffee. Ein Netzwerkausfall wird dabei wie ein gestopptes
+Skript behandelt, weil der ESP diese Fälle nicht sicher unterscheiden kann.
+
+Bei aktiver Erkennung merkt sich der ESP genau einen vorgehaltenen Chip
+für 120 Sekunden. Ein weiterer Scan ersetzt die Vormerkung nicht.
+Die Vormerkung wird beim bestätigten Bezug verbraucht. Alternativ kann der
+Chip bis einschließlich zehn Sekunden nach erkanntem Bezugsende vorgehalten
+werden. Die vier Sekunden zur Bestätigung des Bezugsendes werden auf diese
+Frist angerechnet. Danach folgen 30 Sekunden aus Gruppen schneller,
+abwechselnd 2100 und 3200 Hz hoher Pieptöne. RFID und Webserver bleiben währenddessen bedienbar. Ein nachgereichter Chip ordnet den
+Bezug zu und beendet die Erinnerung auch während dieser 30 Sekunden.
+Danach wird der Bezug als „Ohne Zuordnung“ gebucht. Er zählt zur Gesamtmenge
+und erscheint im Verlauf, aber nicht in der persönlichen Top 5.
+
+Bereits vor der Übertragung ältere Bezüge werden ohne Alarm übernommen.
+Offene Bezüge nach einem ESP-Neustart werden ohne Alarm als unzugeordnet
+abgeschlossen. Die Vormerkung eines noch nicht zugeordneten Chips liegt
+nur im RAM. Ein Neustart verwirft sie.
+
+### Speicherung und Wiederholungen
+
+Der Shelly hält bis zu 40 erkannte Bezüge in KVS vor, jeweils mit eigener ID.
+Er löscht sie erst nach einer passenden ESP-Speicherbestätigung.
+Der ESP schreibt zunächst einen brew-Datensatz ins bestehende Journal und
+später den zugeordneten coffee-Datensatz. Wiederholungen und ein Neustart
+zwischen beiden Schritten erzeugen keinen zweiten Bezug. Bei ausgeschaltetem
+ESP läuft die Erkennung weiter, solange der Shelly Strom hat.
+Ein voller Puffer oder ein Speicherfehler wird im Skriptstatus gemeldet und
+deaktiviert die gesunde Erkennungsbestätigung. Weitere Bezüge bei vollem
+Puffer können nicht gespeichert werden. Ein noch laufender Bezug wird bei
+einem Skript-/Shelly-Neustart verworfen.
+
+Zeitlich passende Sofortbuchungen aus einem Verbindungsabbruch können mit
+nachgelieferten Bezügen verknüpft werden, ohne erneut zu zählen. Das erfolgt
+anhand der Laufzeit in derselben ESP-Sitzung oder bekannter Uhrzeiten
+und ist bei zeitlich überlappenden Bezügen eine Näherung. Ohne vergleichbare
+Zeitbasis bleiben nachgelieferte Bezüge unzugeordnet.
+Der ESP liefert seine gültige Uhrzeit an das Skript. Nach einem Shelly-Neustart
+ohne Zeitquelle bleibt die Zeit unbekannt. Leistungs-Rohdaten werden nicht
+dauerhaft geschrieben, nur abgeschlossene Ereignisse.
+
+### Access Point und AP+STA
+
+„Gerät & WLAN“ listet aktuell verbundene AP-Clients mit MAC- und IP-Adresse.
+Ein erkanntes Shelly-Lebenszeichen markiert den entsprechenden Client.
+Vom Notebook im selben ESP-WLAN lässt sich die IP des Shelly direkt öffnen.
+Diese Verbindung verwendet das AP-Netz. Eine Weiterleitung aus dem Büronetz
+in das AP-Netz ist nicht eingerichtet.
+
+STA-Wiederverbindung funktioniert auch bei verbundenen AP-Clients. Kurze
+asynchrone WLAN-Suchläufe wiederholen sich dann höchstens einmal pro Minute.
+ESP32 verwendet für AP und STA denselben Funkkanal. Beim Wiederverbinden mit
+einem anderen Kanal müssen sich AP-Clients gegebenenfalls neu verbinden.
+
+### Prüfungen für 1.1.0
+
+Beim Nachspielen der beiden gelieferten CSVs erkennt das Skript genau zwei
+Kaffees in Reihe 1 (Endmarken 105,005 und 216,005 Sekunden) und keinen Kaffee
+in der Heißwasser-Reihe 2.
+
+Native Tests prüfen Fristen, Fallback-Zeitfenster und AP+STA-Suchintervalle.
+Die vorhandenen Displaytests verwenden nun die tatsächlich konfigurierten
+Seiten- und Beleuchtungszeiten statt veralteter fester Werte.
+JavaScript-Tests prüfen Erkennung, Messlücken, Wiederanlauf aus KVS und die
+Bestätigung vor dem Löschen gepufferter Ereignisse.
+Vor dem produktiven Einsatz sind ein kompletter Kaffeebezug mit Chip,
+ein Bezug ohne Chip, Heißwasser, ein ESP-Ausfall und ein gestopptes
+Shelly-Skript am echten Gerät zu prüfen.
 
 ## Neu in 1.0.17: TOF-Qualitätsdiagnose für falsche Nahwerte
 

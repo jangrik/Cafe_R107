@@ -1,6 +1,7 @@
 #include "Domain.h"
 #include "TofQuality.h"
 #include "NetworkLogic.h"
+#include "CoffeeLogic.h"
 #include "DisplayLogic.h"
 #include "Backlight.h"
 #include "HealthLogic.h"
@@ -30,7 +31,9 @@ int main(){
  assert(modeChange.take(149,target) && target);
 
  assert(!cafe::mayStartWifiScan(true,0,false,60000));
- assert(!cafe::mayStartWifiScan(false,1,false,60000));
+ assert(cafe::mayStartWifiScan(false,1,false,0));
+ assert(!cafe::mayStartWifiScan(false,1,true,59999));
+ assert(cafe::mayStartWifiScan(false,1,true,60000));
  assert(cafe::mayStartWifiScan(false,0,false,0));
  assert(!cafe::mayStartWifiScan(false,0,true,29999));
  assert(cafe::mayStartWifiScan(false,0,true,30000));
@@ -94,34 +97,33 @@ int main(){
  assert(!cafe::rankingHand(true,120));assert(cafe::rankingHand(true,119));
  assert(!cafe::rankingHand(false,50));assert(!cafe::rankingHand(true,0));
  cafe::RankingCycle cycle;cycle.reset(1000);
- assert(!cycle.update(false,61000) && !cycle.active()); // no periodic display
- assert(cycle.update(true,62000) && cycle.period()==P::Today);
- assert(!cycle.update(true,71999));assert(cycle.update(true,72000) && cycle.period()==P::Month);
- assert(cycle.update(true,82000) && cycle.period()==P::All);
- assert(cycle.update(true,92000) && cycle.period()==P::Today);
- assert(!cycle.update(false,92001) && cycle.active());
- assert(!cycle.update(false,92699) && cycle.active());
- assert(cycle.update(false,92700) && !cycle.active());
- assert(cycle.update(true,93000) && cycle.period()==P::Today);
- assert(!cycle.update(false,93001));
- assert(cycle.update(false,93700)); // sustained removal ends the gesture
+ assert(!cycle.update(false,61000) && !cycle.active());
+ const uint32_t page=cafe::RANKING_PAGE_MS,begin=62000;
+ assert(cycle.update(true,begin) && cycle.period()==P::Today);
+ assert(!cycle.update(true,begin+page-1));
+ assert(cycle.update(true,begin+page) && cycle.period()==P::Month);
+ assert(cycle.update(true,begin+2*page) && cycle.period()==P::All);
+ assert(cycle.update(true,begin+3*page) && cycle.period()==P::Today);
+ assert(!cycle.update(false,begin+3*page+699) && cycle.active());
+ assert(cycle.update(false,begin+3*page+700) && !cycle.active());
  cycle.reset(UINT32_MAX-1000);assert(cycle.update(true,UINT32_MAX-1000));
- assert(!cycle.update(true,8998));assert(cycle.update(true,8999) && cycle.period()==P::Month);
- // A brief dropout exactly at the 10-second transition must not restart Today.
- cycle.reset(0);assert(cycle.update(true,0));assert(!cycle.update(true,9900));
- assert(cycle.update(false,10000) && cycle.period()==P::Month);
- assert(!cycle.update(true,10100) && cycle.period()==P::Month);
- assert(!cycle.update(true,19900));assert(cycle.update(false,20000) && cycle.period()==P::All);
- assert(!cycle.update(true,20100));assert(!cycle.update(true,29900));
- assert(cycle.update(false,30000) && cycle.period()==P::Today);
- // Release and page timing both survive millis rollover.
+ assert(!cycle.update(true,page-1002));
+ assert(cycle.update(true,page-1001) && cycle.period()==P::Month);
+ // A brief dropout at a page transition preserves the gesture and page timer.
+ cycle.reset(0);assert(cycle.update(true,0));
+ assert(!cycle.update(true,page-100));
+ assert(cycle.update(false,page) && cycle.period()==P::Month);
+ assert(!cycle.update(true,page+100) && cycle.period()==P::Month);
+ assert(!cycle.update(true,2*page-100));
+ assert(cycle.update(false,2*page) && cycle.period()==P::All);
  cycle.reset(UINT32_MAX-100);assert(cycle.update(true,UINT32_MAX-100));
- assert(!cycle.update(false,598));assert(cycle.update(false,599) && !cycle.active());
- // Lighting: exact ten-minute cutoff and 30-second proximity grant.
+ assert(!cycle.update(false,598));
+ assert(cycle.update(false,599) && !cycle.active());
+ // Lighting: exact ten-minute cutoff and configured proximity grant.
  cafe::BacklightTimer light;light.reset(1000);
  assert(light.on(600999));assert(!light.on(601000));
  light.approach(602000);assert(light.on(602000));
- assert(light.on(631999));assert(!light.on(632000));
+ assert(light.on(602000+cafe::PROXIMITY_WAKE_MS-1));assert(!light.on(602000+cafe::PROXIMITY_WAKE_MS));
  light.chip(640000);assert(light.on(1239999));assert(!light.on(1240000));
  // Proximity cannot shorten the existing chip window.
  light.chip(2000000);light.approach(2001000);
@@ -129,7 +131,7 @@ int main(){
  light.reset(UINT32_MAX-1000);
  assert(light.on(598998));assert(!light.on(598999));
  light.approach(UINT32_MAX-1000);
- assert(light.on(28998));assert(!light.on(28999));
+ assert(light.on(cafe::PROXIMITY_WAKE_MS-1002));assert(!light.on(cafe::PROXIMITY_WAKE_MS-1001));
  // Expired windows do not reappear on the next millis() wrap.
  assert(!light.on(UINT32_MAX-900));
  cafe::PresenceGate gate;
@@ -154,7 +156,7 @@ int main(){
  assert(light.setMode("auto"));assert(!light.on(4)); // No old timer resurrected.
  light.chip(10);assert(light.on(10));assert(light.on(600009));assert(!light.on(600010));
  light.setMode("off");light.approach(700000);assert(light.on(700000));
- assert(light.on(729999));assert(!light.on(730000));
+ assert(light.on(700000+cafe::PROXIMITY_WAKE_MS-1));assert(!light.on(700000+cafe::PROXIMITY_WAKE_MS));
  // Off also exits forced-on, and a following RFID contact wakes normally.
  light.setMode("on");assert(light.on(900000));
  light.setMode("off");assert(!light.on(900000));
@@ -194,6 +196,16 @@ int main(){
  assert(!cafe::readerVersionPlausible(0));assert(!cafe::readerVersionPlausible(0xff));
  // Per-chip metadata can use the same persistent boot anchor, even after a reset.
  assert(cafe::anchoredEpoch(0,5000,1760000000,65000)==1759999940);
+ assert(!cafe::shellyHeartbeatFresh(false,true,0));
+ assert(!cafe::shellyHeartbeatFresh(true,false,0));
+ assert(cafe::shellyHeartbeatFresh(true,true,15000));
+ assert(!cafe::shellyHeartbeatFresh(true,true,15001));
+ assert(!cafe::liveBrewAge(-1));assert(cafe::liveBrewAge(10000));
+ assert(!cafe::liveBrewAge(10001));
+ assert(!cafe::brewAlarm(10000));assert(cafe::brewAlarm(10001));
+ assert(cafe::brewAlarm(40000));assert(!cafe::brewAlarm(40001));
+ assert(cafe::fallbackMatches(-120000));assert(cafe::fallbackMatches(10000));
+ assert(!cafe::fallbackMatches(-120001));assert(!cafe::fallbackMatches(10001));
  std::cout<<"Calendar, ISO week year, DST, offline anchors, counts, rankings, display cadence and backlight/presence passed.\n";
 }
 

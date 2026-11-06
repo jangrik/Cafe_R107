@@ -1,1 +1,1 @@
-{"private":true,"type":"module","scripts":{"test":"node --test test/web.test.js","check":"node --check data/www/app.js"}}
+{"private":true,"type":"module","scripts":{"test":"node --test test/*.test.js","check":"node --check data/www/app.js"}}

@@ -5,10 +5,13 @@
 #include <WiFi.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <esp_netif.h>
+#include <esp_netif_sta_list.h>
 #include <esp_sntp.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "NetworkLogic.h"
+#include "CoffeeLogic.h"
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -74,8 +77,9 @@ uint64_t lastSeenSequence=0;
 String lastSeenError;
 bool lastSeenWritable=true;
 struct WifiCredential {String ssid,password;};
-struct Config { WifiCredential wifi[3];bool apOnly=false;String apPassword,adminPassword; } cfg,savedCfg;
+struct Config { WifiCredential wifi[3];bool apOnly=false;String apPassword,adminPassword,shellyKey; } cfg,savedCfg;
 cafe::NetworkModeChange networkModeChange;
+bool configNeedsSave=false;
 bool validConfig(const Config& c) {
   if(c.apPassword.length()<8 || c.apPassword.length()>63 ||
       c.adminPassword.length()<8 || c.adminPassword.length()>63)return false;
@@ -88,6 +92,30 @@ std::vector<Pending> pending;
 std::map<String,Anchor> anchors;
 std::set<uint32_t> cancellations;
 String session, storageError;
+using cafe::SHELLY_GRACE_MS;using cafe::SHELLY_ALARM_MS;using cafe::TOKEN_RESERVATION_MS;
+struct Brew {
+  String ref,session;
+  int64_t epoch=0;
+  uint64_t uptime=0,received=0,age=0;
+  bool live=false;
+};
+std::map<String,Brew> openBrews;
+std::set<String> receivedBrews;
+void rememberBrewRef(const String& ref) {
+  receivedBrews.insert(ref);
+  if(receivedBrews.size()>64)receivedBrews.erase(receivedBrews.begin());
+}
+struct FallbackCoffee {uint32_t id;String person,session;int64_t epoch;uint64_t uptime;};
+std::vector<FallbackCoffee> fallbackCoffees;
+std::set<uint32_t> matchedFallbacks;
+
+String reservedPerson,shellyDevice,shellyIP,shellyMac,shellyError,shellyState;
+uint64_t reservedAt=0,shellySeenAt=0;
+bool shellySeen=false,shellyHealthy=false;
+float shellyPower=0;
+uint64_t uptimeMs();
+bool shellyOnline() {return cafe::shellyHeartbeatFresh(shellySeen,shellyHealthy,uptimeMs()-shellySeenAt);}
+
 bool mounted=false, journalOK=true, readerOK=false, fmReady=false, ntpStarted=false;
 uint32_t lastId=0;
 uint32_t lastPoll=0, lastPresence=0, lastAccepted=0, displayAt=0;
@@ -291,7 +319,7 @@ uint64_t uptimeMs() { return static_cast<uint64_t>(esp_timer_get_time()/1000); }
 int64_t epochNow() { int64_t t=time(nullptr); return cafe::validTime(t) ? t : 0; }
 String randomHex() { char b[17]; snprintf(b,sizeof(b),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random()); return b; }
 String apName() { return "Cafe-R107-"+WiFi.macAddress().substring(12,14)+WiFi.macAddress().substring(15,17); }
-String personName(const String& id) { for(const auto& p:people) if(p.id==id) return p.name; return "Unbekannte Person"; }
+String personName(const String& id) { for(const auto& p:people) if(p.id==id) return p.name; return id.length()?"Unbekannte Person":"Ohne Zuordnung"; }
 String personFor(const String& uid) { for(const auto& c:cards) if(c.uid==uid) return c.person; return ""; }
 bool personExists(const String& id) { for(const auto& p:people) if(p.id==id) return true; return false; }
 
@@ -448,7 +476,7 @@ int64_t lastSeenEpoch(const LastSeen& seen) {
 
 bool saveConfig() {
   JsonDocument d; d["schema"]=1; d["ssid"]=cfg.wifi[0].ssid; d["wifiPassword"]=cfg.wifi[0].password;
-  d["apOnly"]=cfg.apOnly;
+  d["apOnly"]=cfg.apOnly;d["shellyKey"]=cfg.shellyKey;
   auto networks=d["wifiNetworks"].to<JsonArray>();
   for(const auto& n:cfg.wifi) {auto o=networks.add<JsonObject>();o["ssid"]=n.ssid;o["password"]=n.password;}
   d["apPassword"]=cfg.apPassword; d["adminPassword"]=cfg.adminPassword;
@@ -470,6 +498,8 @@ bool loadConfig() {
   if(!f || deserializeJson(d,f) || d["schema"]!=1) return false;
   if(!d["ssid"].is<String>() || !d["wifiPassword"].is<String>() || !d["apPassword"].is<String>() || !d["adminPassword"].is<String>()) return false;
   Config next;
+  next.shellyKey=d["shellyKey"]|cfg.shellyKey;
+  configNeedsSave=!d["shellyKey"].is<String>();
   next.wifi[0].ssid=d["ssid"].as<String>(); next.wifi[0].password=d["wifiPassword"].as<String>();
   next.apPassword=d["apPassword"].as<String>(); next.adminPassword=d["adminPassword"].as<String>();
   // Legacy schema 1 contains only ssid/wifiPassword. Preserve it in slot 1.
@@ -523,7 +553,7 @@ bool scanJournal(const std::function<void(JsonDocument&)>& visit) {
     JsonDocument d;
     if(!newline || !line.length() || deserializeJson(d,line)) return false;
     String kind=d["kind"].as<String>();
-    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock")) return false;
+    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock" && kind!="brew")) return false;
     visit(d); serviceBuzzer(); delay(0);
   }
   return true;
@@ -549,7 +579,32 @@ void loadJournal() {
     } else if(kind=="cancel") {
       uint32_t target=d["target"]|0U; if(!target || target>=id) valid=false;
       cancellations.insert(target);
-    } else if(!d["person"].is<String>() || !d["session"].is<String>() || !d["uptime"].is<uint64_t>()) valid=false;
+    } else if(kind=="brew") {
+      String ref=d["ref"]|"";
+      if(!ref.length() || receivedBrews.count(ref) || !d["session"].is<String>() ||
+          !d["uptime"].is<uint64_t>()) {valid=false;return;}
+      Brew b;b.ref=ref;b.session=d["session"].as<String>();
+      b.epoch=d["epoch"]|int64_t(0);b.uptime=d["uptime"].as<uint64_t>();
+      rememberBrewRef(ref);
+      if(d["fallback"].is<uint32_t>()) {
+        uint32_t target=d["fallback"].as<uint32_t>();
+        bool found=false;
+        for(const auto& coffee:fallbackCoffees)if(coffee.id==target)found=true;
+        if(!target || target>=id || matchedFallbacks.count(target))valid=false;
+        if(found)matchedFallbacks.insert(target);
+      } else openBrews[ref]=b;
+    } else {
+      if(!d["person"].is<String>() || !d["session"].is<String>() || !d["uptime"].is<uint64_t>())valid=false;
+      if(d["ref"].is<String>())openBrews.erase(d["ref"].as<String>());
+      if(d["source"]=="fallback") {
+        fallbackCoffees.push_back({id,d["person"].as<String>(),d["session"].as<String>(),
+          d["epoch"]|int64_t(0),d["uptime"].as<uint64_t>()});
+        if(fallbackCoffees.size()>120) {
+          matchedFallbacks.erase(fallbackCoffees.front().id);
+          fallbackCoffees.erase(fallbackCoffees.begin());
+        }
+      }
+    }
   }) && valid;
   if(!journalOK) storageError="Journal beschaedigt: sichern und pruefen";
 }
@@ -582,6 +637,7 @@ void rankingScreen(cafe::RankingPeriod period) {
   if(readable && !timeMissing) {
     readable=scanJournal([&](JsonDocument& e){
       if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
+      if(!e["person"].as<String>().length())return;
       if(cafe::inRankingPeriod(recordEpoch(e),now,period)) ++counts[e["person"].as<String>()];
     });
     if(!readable) { journalOK=false; storageError="Journal nicht lesbar"; }
@@ -649,6 +705,72 @@ void anchorClock() {
   else if(!storageError.length()) storageError="Zeitanker nicht gespeichert";
 }
 
+// Persist each detected brew before acknowledging it to the Shelly.
+// A later coffee record resolves it, including after a power failure.
+bool finishBrew(const Brew& b,const String& person) {
+  JsonDocument d;d["kind"]="coffee";d["person"]=person;d["ref"]=b.ref;
+  d["epoch"]=b.epoch;d["session"]=b.session;d["uptime"]=b.uptime;
+  if(!appendRecord(d))return false;
+  openBrews.erase(b.ref);
+  return true;
+}
+Brew* oldestLiveBrew() {
+  Brew* oldest=nullptr;
+  for(auto& item:openBrews) {
+    Brew& b=item.second;
+    if(!b.live || b.age+uptimeMs()-b.received>SHELLY_GRACE_MS+SHELLY_ALARM_MS)continue;
+    // Compare current ages: an imported age may exceed this ESP's uptime.
+    if(!oldest || b.age+uptimeMs()-b.received>oldest->age+uptimeMs()-oldest->received)oldest=&b;
+  }
+  return oldest;
+}
+bool assignShellyToken(const String& person) {
+  Brew* b=oldestLiveBrew();
+  if(b) {
+    if(!finishBrew(*b,person)) {
+      message("Nicht gebucht","Speicherfehler","Bitte Browser","pruefen!",false);return true;
+    }
+    beeps=0;toneHz(0);
+    message("+1 Kaffee",personName(person),"Bezug zugeordnet","Guten Genuss!",true);
+    beep(1,BUZZER_FREQUENCY,BUZZER_MS);return true;
+  }
+  if(!shellyOnline())return false;
+  if(reservedPerson.length()) {
+    message("Chip schon vorgemerkt",personName(reservedPerson),"Erst Kaffee beziehen","oder 120 s warten",false);
+    beep(2,1800,80);return true;
+  }
+  reservedPerson=person;reservedAt=uptimeMs();
+  message("Chip vorgemerkt",personName(person),"Jetzt Kaffee beziehen","Gilt fuer 120 s",true);
+  beep(1,1800,100);return true;
+}
+void serviceCoffee() {
+  uint64_t now=uptimeMs();
+  if(reservedPerson.length() && now-reservedAt>TOKEN_RESERVATION_MS)reservedPerson="";
+  bool alarm=false;
+  for(auto it=openBrews.begin();it!=openBrews.end();) {
+    Brew b=it->second;++it;
+    uint64_t age=b.age+now-b.received;
+    if(!b.live || age>SHELLY_GRACE_MS+SHELLY_ALARM_MS) {
+      if(!finishBrew(b,""))return;
+    } else if(cafe::brewAlarm(age))alarm=true;
+  }
+  static bool wasAlarm=false;
+  static uint64_t lastPulse=0;
+  if(alarm) {
+    if(!wasAlarm) {
+      message("Kaffee ohne Chip!","Bitte Chip vorhalten","Zuordnung fehlt","30 s Erinnerung",false);
+      backlightTimer.chip(millis());serviceBacklight();
+    }
+    // Three short alternating chirps each second, with silence between groups.
+    uint64_t phase=now%1000;
+    if(phase<600 && now-lastPulse>=200) {
+      lastPulse=now;beep(1,(now/200)%2?3200:2100,90);
+    }
+    displayAt=millis(); // Keep the reminder visible while it is sounding.
+  } else if(wasAlarm) {beeps=0;toneHz(0);}
+  wasAlarm=alarm;
+}
+
 void handleCard(const String& uid) {
   if(!mounted || !journalOK || storageError.length()) {
     message("Nicht gebucht","Speicherfehler","Bitte Weboberflaeche","pruefen!!!",false); beep(3,1000,70); return;
@@ -663,9 +785,16 @@ void handleCard(const String& uid) {
     }
     message("Neuer Chip",uid,"Bitte im Browser","zuordnen!!!",false); beep(2,1500,90); return;
   }
-  JsonDocument d; d["kind"]="coffee"; d["person"]=person;
+  if(assignShellyToken(person))return;
+  reservedPerson="";
+  JsonDocument d; d["kind"]="coffee"; d["person"]=person;d["source"]="fallback";
   d["epoch"]=epochNow(); d["session"]=session; d["uptime"]=uptimeMs();
   if(!appendRecord(d)) { message("Nicht gebucht","Speicherfehler","Bitte im Browser","pruefen!!!",false); beep(3,1000,70); return; }
+  fallbackCoffees.push_back({lastId,person,session,d["epoch"].as<int64_t>(),d["uptime"].as<uint64_t>()});
+  if(fallbackCoffees.size()>120) {
+    matchedFallbacks.erase(fallbackCoffees.front().id);
+    fallbackCoffees.erase(fallbackCoffees.begin());
+  }
   message("+1 Kaffee",personName(person),"Gespeichert.",epochNow()?"Guten Genuss!":"Zeit noch offen",true);
   beep(1,BUZZER_FREQUENCY,BUZZER_MS);
 }
@@ -827,6 +956,83 @@ void apiRestart() {
 }
 
 void networkStatusJson(JsonDocument& d);
+bool validShellyId(const String& id) {
+  if(!id.length() || id.length()>64)return false;
+  for(unsigned i=0;i<id.length();++i) {
+    char c=id[i];if(!isalnum(static_cast<unsigned char>(c)) && c!='-' && c!='_')return false;
+  }
+  return true;
+}
+void apiShelly() {
+  if(!cfg.shellyKey.length() || web.header("X-Cafe-Shelly")!=cfg.shellyKey) {error(403,"Shelly-Schluessel fehlt");return;}
+  JsonDocument d;if(!body(d))return;
+  String device=d["device"]|"",type=d["type"]|"";
+  if(!validShellyId(device) || (type!="heartbeat" && type!="brew")) {error(400,"Ungueltige Shelly-Nachricht");return;}
+  JsonDocument out;out["ok"]=true;out["epoch"]=epochNow();
+  if(type=="heartbeat") {
+    if(!d["healthy"].is<bool>()) {error(400,"healthy fehlt");return;}
+    shellySeen=true;shellySeenAt=uptimeMs();shellyHealthy=d["healthy"];
+    shellyDevice=device;shellyIP=web.client().remoteIP().toString();
+    shellyMac=d["mac"]|"";shellyMac.replace(":","");shellyMac.toUpperCase();
+    shellyPower=d["power"]|0.0f;shellyError=d["error"]|"";shellyState=d["state"]|"";
+    sendJson(out);return;
+  }
+  String event=d["event"]|"";
+  if(!validShellyId(event) || !d["ageMs"].is<int64_t>() || d["ageMs"].as<int64_t>()< -1) {
+    error(400,"Ungueltiges Ereignis");return;
+  }
+  String ref=device+"/"+event;out["event"]=event;
+  bool known=receivedBrews.count(ref);
+  if(!known && mounted && journalOK) {
+    bool readable=scanJournal([&](JsonDocument& e){
+      if(e["kind"]=="brew" && e["ref"].as<String>()==ref)known=true;
+    });
+    if(!readable) {journalOK=false;storageError="Journal nicht lesbar";}
+  }
+  if(known) {rememberBrewRef(ref);sendJson(out);return;}
+  if(!mounted || !journalOK || storageError.length() || openBrews.size()>=40) {
+    error(503,"Bezug kann nicht sicher gespeichert werden");return;
+  }
+  int64_t age=d["ageMs"].as<int64_t>();
+  Brew b;b.ref=ref;b.session=session;b.received=uptimeMs();
+  b.live=cafe::liveBrewAge(age);
+  b.age=age>=0?uint64_t(age):0;
+  int64_t epoch=d["epoch"]|int64_t(0);
+  b.epoch=cafe::validTime(epoch)?epoch:0;
+  // Use a local clock anchor only if the event fits into this ESP boot.
+  if(age>=0 && uint64_t(age)<=b.received) {
+    b.uptime=b.received-uint64_t(age);
+    if(!b.epoch && epochNow())b.epoch=epochNow()-age/1000;
+  } else {b.session="shelly-"+device+"-"+event;b.uptime=0;}
+  uint32_t fallback=0;
+  for(auto coffeeIt=fallbackCoffees.rbegin();coffeeIt!=fallbackCoffees.rend();++coffeeIt) {
+    const auto& coffee=*coffeeIt;
+    if(matchedFallbacks.count(coffee.id) || cancellations.count(coffee.id))continue;
+    int64_t delta=INT64_MAX;
+    if(coffee.session==b.session)delta=int64_t(coffee.uptime)-int64_t(b.uptime);
+    else if(coffee.epoch && b.epoch)delta=(coffee.epoch-b.epoch)*1000;
+    if(cafe::fallbackMatches(delta)) {
+      fallback=coffee.id;break;
+    }
+  }
+  JsonDocument e;e["kind"]="brew";e["ref"]=b.ref;e["session"]=b.session;
+  e["uptime"]=b.uptime;e["epoch"]=b.epoch;
+  if(fallback)e["fallback"]=fallback;
+  if(!appendRecord(e)) {error(507,"Bezug nicht gespeichert");return;}
+  rememberBrewRef(ref);
+  if(fallback) {matchedFallbacks.insert(fallback);sendJson(out);return;}
+  openBrews[ref]=b;
+  bool reservedMatches=age>=0 && reservedPerson.length() &&
+      cafe::fallbackMatches(int64_t(reservedAt)-int64_t(b.received)+age);
+  if(reservedMatches) {
+    if(finishBrew(b,reservedPerson)) {
+      message("+1 Kaffee",personName(reservedPerson),"Bezug bestaetigt","Guten Genuss!",true);
+      reservedPerson="";beep(1,BUZZER_FREQUENCY,BUZZER_MS);
+    }
+  } else if(b.live)message("Kaffee erkannt","Bitte Chip vorhalten",
+      "Noch "+String(static_cast<unsigned long>((SHELLY_GRACE_MS-b.age+999)/1000))+" Sekunden","",false);
+  sendJson(out);
+}
 void apiStatus() {
   if(!auth()) return; JsonDocument d;
   d["rankingActive"]=rankingCycle.active();
@@ -840,6 +1046,12 @@ void apiStatus() {
   d["version"]=cafe::VERSION; d["apSsid"]=apName(); d["apIP"]=WiFi.softAPIP().toString();
   d["staConnected"]=WiFi.status()==WL_CONNECTED; d["staIP"]=WiFi.localIP().toString(); d["ssid"]=cfg.wifi[0].ssid;
   networkStatusJson(d);
+  auto sh=d["shelly"].to<JsonObject>();sh["online"]=shellyOnline();sh["device"]=shellyDevice;
+  sh["ip"]=shellyIP;sh["power"]=shellyPower;sh["error"]=shellyError;sh["state"]=shellyState;
+  sh["key"]=cfg.shellyKey;sh["openBrews"]=openBrews.size();
+  sh["reservedPerson"]=reservedPerson;
+  if(shellySeen)sh["ageMs"]=uptimeMs()-shellySeenAt;else sh["ageMs"]=nullptr;
+
   d["epoch"]=epochNow(); d["readerOK"]=readerOK; d["storageError"]=storageError;
   d["journalOK"]=journalOK; d["fsUsed"]=mounted?LittleFS.usedBytes():0; d["fsTotal"]=mounted?LittleFS.totalBytes():0;
   d["session"]=session; d["uptime"]=uptimeMs(); d["pendingCount"]=pending.size(); d["filemanagerPort"]=FM_PORT;
@@ -1020,7 +1232,8 @@ uint32_t fmFlags(fs::FS&,String,uint32_t flags) {
     ESPFMfGK::flagCanGZip|ESPFMfGK::flagCanDownload|ESPFMfGK::flagAllowInZip|ESPFMfGK::flagCanUpload|ESPFMfGK::flagCanCreateNew;
 }
 void setupWeb() {
-  const char* headers[]={"X-Cafe-Request"};web.collectHeaders(headers,1);
+  const char* headers[]={"X-Cafe-Request","X-Cafe-Shelly"};web.collectHeaders(headers,2);
+  web.on("/api/shelly",HTTP_POST,apiShelly);
   web.on("/api/restart",HTTP_GET,apiRestart);
   web.on("/api/restart",HTTP_POST,apiRestart);
   web.on("/api/display",HTTP_GET,apiDisplayGet);
@@ -1094,6 +1307,21 @@ const char* resetReasonName(esp_reset_reason_t reason) {
 void networkStatusJson(JsonDocument& d) {
   d["apOnly"]=cfg.apOnly;d["activeSsid"]=WiFi.status()==WL_CONNECTED?WiFi.SSID():String("");
   d["wifiChannel"]=WiFi.channel();d["apClients"]=WiFi.softAPgetStationNum();
+  auto clients=d["apClientList"].to<JsonArray>();
+  wifi_sta_list_t wifiList{};esp_netif_sta_list_t ipList{};
+  if(esp_wifi_ap_get_sta_list(&wifiList)==ESP_OK && esp_netif_get_sta_list(&wifiList,&ipList)==ESP_OK) {
+    for(int i=0;i<ipList.num;++i) {
+      const auto& station=ipList.sta[i];char mac[18];
+      snprintf(mac,sizeof(mac),"%02X:%02X:%02X:%02X:%02X:%02X",
+        station.mac[0],station.mac[1],station.mac[2],station.mac[3],station.mac[4],station.mac[5]);
+      auto client=clients.add<JsonObject>();client["mac"]=mac;
+      String ip=IPAddress(station.ip.addr).toString();
+      String compactMac=mac;compactMac.replace(":","");
+      bool isShelly=shellyOnline() && (compactMac==shellyMac || (ip!="0.0.0.0" && ip==shellyIP));
+      if(isShelly && ip=="0.0.0.0")ip=shellyIP; // Static IPs may have no DHCP lease.
+      client["ip"]=ip;client["shelly"]=isShelly;
+    }
+  }
   d["wifiScanRunning"]=networkScanning;d["wifiConnecting"]=networkConnecting;
   d["wifiLogDropped"]=networkDroppedEvents;
   d["freeHeap"]=ESP.getFreeHeap();d["minFreeHeap"]=ESP.getMinFreeHeap();
@@ -1153,8 +1381,7 @@ void serviceNetwork() {
   if(networkScanning) {
     int count=WiFi.scanComplete();if(count==WIFI_SCAN_RUNNING)return;
     networkScanning=false;networkScanAt=now;
-    // A laptop may have joined during the scan: do not start association now.
-    if(WiFi.softAPgetStationNum()>0) {WiFi.scanDelete();return;}
+    // AP clients reconnect after a STA channel change; never starve STA recovery.
     int best=-1,bestSlot=-1,bestRssi=-1000;
     for(int i=0;i<count;++i)for(unsigned slot=0;slot<3;++slot) {
       if(networkAttemptedSlots&(1U<<slot))continue;
@@ -1178,7 +1405,7 @@ void serviceNetwork() {
   if(!cafe::mayStartWifiScan(cfg.apOnly,WiFi.softAPgetStationNum(),networkTried,uint32_t(now-networkScanAt)))return;
   networkTried=true;networkScanAt=now;
   Serial.printf("[WIFI %lu ms] async_scan_start\n",(unsigned long)now);
-  int result=WiFi.scanNetworks(true);
+  int result=WiFi.scanNetworks(true,false,false,120);
   networkScanning=result==WIFI_SCAN_RUNNING || result>=0;
   if(!networkScanning)Serial.printf("[WIFI %lu ms] async_scan_failed=%d\n",(unsigned long)now,result);
 }
@@ -1199,11 +1426,12 @@ void setup() {
   readerOK=readerOK && probeReader();
   rfidDiagnostics.healthy=readerOK;if(!readerOK)rfidDiagnostics.error="not_initialized";
   setenv("TZ",cafe::TZ_BERLIN,1);tzset();session=randomHex();
-  cfg.apPassword=randomHex().substring(0,12);cfg.adminPassword=randomHex().substring(0,12);
+  cfg.apPassword=randomHex().substring(0,12);cfg.adminPassword=randomHex().substring(0,12);cfg.shellyKey=randomHex();
   mounted=LittleFS.begin(false);
   if(!mounted)storageError="LittleFS nicht bereit - kein automatisches Formatieren";
   else if(!loadConfig())storageError="config.json ungueltig - Wiederherstellung noetig";
   if(mounted && !storageError.length()) {
+    if(configNeedsSave && !saveConfig())storageError="Konfiguration nicht gespeichert";
     if(!loadRegistry())storageError="registry.json ungueltig";
     else loadJournal();
     if(!loadLastSeen()) {lastSeenWritable=false;lastSeenError="lastseen.json ungueltig: bitte sichern und pruefen";}
@@ -1216,7 +1444,7 @@ void setup() {
   WiFi.persistent(false);WiFi.setAutoReconnect(false);
   WiFi.mode(cfg.apOnly?WIFI_AP:WIFI_AP_STA);WiFi.setHostname("cafe-r107");
   bool apOK=WiFi.softAP(apName().c_str(),cfg.apPassword.c_str());
-  Serial.printf("[WIFI] mode=%s; background scans pause while AP has clients\n",cfg.apOnly?"AP_ONLY":"AP_STA");
+  Serial.printf("[WIFI] mode=%s; STA recovery enabled with AP clients\n",cfg.apOnly?"AP_ONLY":"AP_STA");
   setupWeb();setupTof();healthSchedule.reset(millis());
   tofDiagnostics.error=tofOK?"waiting_for_measurement":"not_initialized";
   Serial.printf("\nCafe R107 %s\nAP: %s (%s)\nAP-Passwort: %s\nWeb: http://%s/\nDateien: http://%s:8080/\nLogin: admin / %s\n",cafe::VERSION,apName().c_str(),apOK?"OK":"FEHLER",cfg.apPassword.c_str(),WiFi.softAPIP().toString().c_str(),WiFi.softAPIP().toString().c_str(),cfg.adminPassword.c_str());
@@ -1238,7 +1466,7 @@ void setup() {
 }
 void loop() {
   ArduinoOTA.handle(); serviceBuzzer();serviceNetwork();anchorClock();serviceTof();serviceBacklight();serviceDeviceHealth();
-  pollRFID();web.handleClient();if(fmReady)filemgr.handleClient();serviceBuzzer();
+  pollRFID();web.handleClient();serviceCoffee();if(fmReady)filemgr.handleClient();serviceBuzzer();
   serviceDisplay();
   // File operations and the HTTP response have completed before restarting.
   if(restartRequest.due(millis())) {toneHz(0);ESP.restart();}

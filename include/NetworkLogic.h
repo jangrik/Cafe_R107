@@ -2,7 +2,8 @@
 #include <stdint.h>
 namespace cafe {
 inline bool mayStartWifiScan(bool apOnly,unsigned apClients,bool tried,uint32_t age) {
-  return !apOnly && apClients==0 && (!tried || age>=30000);
+  // Short scans with a longer retry interval preserve STA recovery with AP clients.
+  return !apOnly && (!tried || age>=(apClients?60000U:30000U));
 }
 }
 
