@@ -30,6 +30,20 @@ int main(){
  modeChange.schedule(true,UINT32_MAX-100);assert(!modeChange.take(148,target));
  assert(modeChange.take(149,target) && target);
 
+ // Reproduce the real AP+STA log: Core's 2400 ms timeout precedes
+ // the driver's SCAN_DONE at 4382 ms. Results must not be read early.
+ cafe::WifiScanWait scanWait;scanWait.begin(34034);
+ assert(!scanWait.completed() && !scanWait.expired(36439));
+ assert(!scanWait.completed() && !scanWait.expired(38416));
+ scanWait.complete();assert(scanWait.completed());
+ // A new scan must not inherit the old completion. Missing callbacks have
+ // a bounded watchdog, including across millis() rollover.
+ scanWait.begin(66441);assert(!scanWait.completed());
+ assert(!scanWait.expired(81440));assert(scanWait.expired(81441));
+ scanWait.begin(UINT32_MAX-1000);
+ assert(!scanWait.completed() && !scanWait.expired(13998));
+ assert(scanWait.expired(13999));
+
  assert(!cafe::mayStartWifiScan(true,0,false,60000));
  assert(cafe::mayStartWifiScan(false,1,false,0));
  assert(!cafe::mayStartWifiScan(false,1,true,59999));

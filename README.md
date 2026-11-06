@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.1.0
+# Cafe R107 · Version 1.1.1
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,19 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.1.1
+
+Die WLAN-Suche wartet auf das Ereignis SCAN_DONE, bevor sie die Suchergebnisse
+ausliest. In Arduino-ESP32 2.0.17 führt ein vorzeitiger Aufruf von scanComplete()
+bei der gewählten Kanalzeit von 120 ms bereits nach 2400 ms zum Fehler -2.
+Der tatsächliche AP+STA-Suchlauf benötigte im gemeldeten Protokoll rund
+4350 ms. Die Ergebnisse wurden dadurch verworfen, bevor sie bereitstanden.
+Ein eigener 15-Sekunden-Watchdog beendet einen Suchlauf, dessen Abschlussereignis
+ausbleibt. Auch mit verbundenem Shelly bleiben STA-Verbindungsversuche möglich.
+
+Für das Update von 1.1.0 genügt ein Firmware-Upload. Das Shelly-Skript und
+die Webdateien sind weiterhin zur Version 1.1.1 kompatibel.
 
 ## Neu in 1.1.0
 

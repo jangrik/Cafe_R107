@@ -1,6 +1,17 @@
 #pragma once
 #include <stdint.h>
 namespace cafe {
+// Core 2.0.17 scanComplete() times out after 20 * per-channel scan time.
+// AP+STA may take longer, so wait for SCAN_DONE before reading the results.
+class WifiScanWait {
+  uint32_t startedAt_=0;
+  bool completed_=false;
+public:
+  void begin(uint32_t now) {startedAt_=now;completed_=false;}
+  void complete() {completed_=true;}
+  bool completed() const {return completed_;}
+  bool expired(uint32_t now) const {return uint32_t(now-startedAt_)>=15000;}
+};
 inline bool mayStartWifiScan(bool apOnly,unsigned apClients,bool tried,uint32_t age) {
   // Short scans with a longer retry interval preserve STA recovery with AP clients.
   return !apOnly && (!tried || age>=(apClients?60000U:30000U));

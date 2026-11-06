@@ -1281,6 +1281,7 @@ QueueHandle_t networkEvents=nullptr;
 volatile uint32_t networkDroppedEvents=0;
 uint32_t networkScanAt=0,networkAttemptAt=0,networkLogAt=0;
 bool networkScanning=false,networkConnecting=false,networkTried=false;
+cafe::WifiScanWait networkScanWait;
 uint8_t networkAttemptedSlots=0;
 int networkChannel=-1;
 void networkEvent(arduino_event_id_t event,arduino_event_info_t info) {
@@ -1349,6 +1350,7 @@ void serviceNetwork() {
       (unsigned long)now,requestedMode?"AP_ONLY":"AP_STA",switched?"ok":"failed",cfg.apOnly?"AP_ONLY":"AP_STA");
   }
   while(networkEvents && xQueueReceive(networkEvents,&event,0)==pdTRUE) {
+    if(event.id==ARDUINO_EVENT_WIFI_SCAN_DONE && networkScanning)networkScanWait.complete();
     Serial.printf("[WIFI %lu ms] %s",(unsigned long)event.at,WiFi.eventName(event.id));
     if(event.id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
       Serial.printf(" reason=%u (%s)",event.reason,WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(event.reason)));
@@ -1379,6 +1381,14 @@ void serviceNetwork() {
   bool configured=false;for(const auto& n:cfg.wifi)if(n.ssid.length())configured=true;
   if(!configured)return;
   if(networkScanning) {
+    // Do not poll scanComplete() during an AP+STA scan: Core 2.0.17's
+    // 120 ms * 20 timeout expires before the driver finishes all channels.
+    if(!networkScanWait.completed()) {
+      if(!networkScanWait.expired(now))return;
+      esp_wifi_scan_stop();WiFi.scanDelete();networkScanning=false;networkScanAt=now;
+      Serial.printf("[WIFI %lu ms] scan_completion_timeout; retry later\n",(unsigned long)now);
+      return;
+    }
     int count=WiFi.scanComplete();if(count==WIFI_SCAN_RUNNING)return;
     networkScanning=false;networkScanAt=now;
     // AP clients reconnect after a STA channel change; never starve STA recovery.
@@ -1398,15 +1408,17 @@ void serviceNetwork() {
       networkConnecting=true;networkAttemptAt=now;
     } else {
       WiFi.scanDelete();networkAttemptedSlots=0;
-      Serial.printf("[WIFI %lu ms] no untried matching WLAN (scan=%d); retry after 30s\n",(unsigned long)now,count);
+      Serial.printf("[WIFI %lu ms] no untried matching WLAN (scan=%d); retry after %us\n",
+        (unsigned long)now,count,WiFi.softAPgetStationNum()?60:30);
     }
     return;
   }
   if(!cafe::mayStartWifiScan(cfg.apOnly,WiFi.softAPgetStationNum(),networkTried,uint32_t(now-networkScanAt)))return;
-  networkTried=true;networkScanAt=now;
+  networkTried=true;networkScanAt=now;networkScanWait.begin(now);
   Serial.printf("[WIFI %lu ms] async_scan_start\n",(unsigned long)now);
   int result=WiFi.scanNetworks(true,false,false,120);
   networkScanning=result==WIFI_SCAN_RUNNING || result>=0;
+  if(result>=0)networkScanWait.complete();
   if(!networkScanning)Serial.printf("[WIFI %lu ms] async_scan_failed=%d\n",(unsigned long)now,result);
 }
 void setup() {
