@@ -1,4 +1,4 @@
-// Cafe_R107 Shelly script 1.1.1 – Shelly Plug M/S Gen3, Matter must be disabled.
+// Cafe_R107 Shelly script 1.1.2 – Shelly Plug M/S Gen3, Matter must be disabled.
 // Set the key shown in Cafe_R107 > Gerät & WLAN. Enable "Run on startup".
 // The Shelly joins only the ESP access point. Relay settings are not modified.
 let ESP_URL = "http://192.168.4.1/api/shelly";
@@ -236,11 +236,10 @@ Timer.set(SAMPLE_MS, true, function () {
 HTTPServer.registerEndpoint("status", function (request, response) {
   response.code = 200;
   response.headers = [["Content-Type", "application/json"]];
-  response.body = JSON.stringify({version: "1.1.1", device: device, ready: loaded,
+  response.body = JSON.stringify({version: "1.1.2", device: device, ready: loaded,
     state: phase, power: lastPower, queued: queue.length, error: fault,
     recognized: recognizedCount, lastDecision: lastDecision,
     configured: API_KEY !== "HIER_SHELLY_SCHLUESSEL_EINTRAGEN"});
   response.send();
 });
 loadQueue(0);
-print("Cafe_R107 Erkennung gestartet. Diagnose: /script/" + Shelly.getCurrentScriptId() + "/status");
