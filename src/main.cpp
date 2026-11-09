@@ -553,7 +553,7 @@ bool scanJournal(const std::function<void(JsonDocument&)>& visit) {
     JsonDocument d;
     if(!newline || !line.length() || deserializeJson(d,line)) return false;
     String kind=d["kind"].as<String>();
-    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock" && kind!="brew")) return false;
+    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock" && kind!="brew" && kind!="reservation")) return false;
     visit(d); serviceBuzzer(); delay(0);
   }
   return true;
@@ -562,6 +562,18 @@ bool appendRecord(JsonDocument& d) {
   if(!mounted || !journalOK || storageError.length()) return false;
   if(LittleFS.totalBytes()-LittleFS.usedBytes()<16384) { storageError="LittleFS voll: bitte sichern und archivieren"; return false; }
   d["id"]=lastId+1;
+  // Human-readable snapshots only: accounting never reads these fields.
+  auto info=d["_info"].to<JsonObject>();
+  String person=d["person"]|"";
+  info["person"]=person.length()?personName(person):String("");
+  int64_t epoch=d["epoch"]|int64_t(0);
+  if(!cafe::validTime(epoch)) {
+    String boot=d["session"]|"";auto anchor=anchors.find(boot);
+    if(anchor!=anchors.end())epoch=cafe::anchoredEpoch(epoch,d["uptime"]|uint64_t(0),anchor->second.epoch,anchor->second.uptime);
+  }
+  info["datetime"]=cafe::validTime(epoch)?String(cafe::dateKey(epoch,"%Y-%m-%d %H:%M:%S %Z").c_str()):String("Zeit unbekannt");
+  // Keep every written line readable by scanJournal, including escaped names.
+  if(d.overflowed() || measureJson(d)>1024) {storageError="Journal-Eintrag zu gross";return false;}
   File f=LittleFS.open("/journal.ndjson","a"); if(!f) {storageError="Journal kann nicht geoeffnet werden";return false;}
   size_t expected=measureJson(d), n=serializeJson(d,f); size_t end=f.print('\n'); f.flush(); f.close();
   if(n!=expected || end!=1) { journalOK=false; storageError="Journal-Schreibfehler"; return false; }
@@ -593,6 +605,10 @@ void loadJournal() {
         if(!target || target>=id || matchedFallbacks.count(target))valid=false;
         if(found)matchedFallbacks.insert(target);
       } else openBrews[ref]=b;
+    } else if(kind=="reservation") {
+      if(!d["person"].is<String>() || !d["session"].is<String>() ||
+          !d["uptime"].is<uint64_t>())valid=false;
+      // Audit only: do not restore an expired token or resolve an open brew.
     } else {
       if(!d["person"].is<String>() || !d["session"].is<String>() || !d["uptime"].is<uint64_t>())valid=false;
       if(d["ref"].is<String>())openBrews.erase(d["ref"].as<String>());
@@ -739,7 +755,13 @@ bool assignShellyToken(const String& person) {
     message("Chip schon vorgemerkt",personName(reservedPerson),"Erst Kaffee beziehen","oder 120 s warten",false);
     beep(2,1800,80);return true;
   }
-  reservedPerson=person;reservedAt=uptimeMs();
+  JsonDocument d;d["kind"]="reservation";d["person"]=person;
+  d["epoch"]=epochNow();d["session"]=session;d["uptime"]=uptimeMs();
+  if(!appendRecord(d)) {
+    message("Nicht vorgemerkt","Speicherfehler","Bitte Browser","pruefen!",false);
+    beep(3,1000,70);return true;
+  }
+  reservedPerson=person;reservedAt=d["uptime"].as<uint64_t>();
   message("Chip vorgemerkt",personName(person),"Jetzt Kaffee beziehen","Gilt fuer 120 s",true);
   beep(1,1800,100);return true;
 }
@@ -1484,5 +1506,3 @@ void loop() {
   if(restartRequest.due(millis())) {toneHz(0);ESP.restart();}
   delay(1);
 }
-
-

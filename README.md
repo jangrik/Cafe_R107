@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.1.1
+# Cafe R107 · Version 1.1.2
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,31 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in Firmware 1.1.2: Journal der Vormerkungen
+
+Eine erfolgreich angelegte Chip-Vormerkung wird als `kind: "reservation"` mit
+fortlaufender ID, Personen-ID, epoch, session und uptime in journal.ndjson
+protokolliert. Sie zählt nicht als Kaffee und wird nach einem Neustart nicht
+als aktive Vormerkung wiederhergestellt. Erneutes Vorhalten bei bestehender
+Vormerkung legt keine weitere Vormerkung an. Bei Schreibfehler wird keine
+Vormerkung bestätigt. Direkte Bezugszuordnungen und Offline-Sofortbuchungen
+bleiben coffee-Einträge.
+
+Alle neuen Journalzeilen enthalten `_info.person` (Namensstand beim Schreiben)
+und `_info.datetime` (Berliner Ortszeit mit CET/CEST, sonst „Zeit unbekannt“).
+Diese Zusatzfelder werden nicht ausgewertet. Alte Zeilen bleiben unverändert;
+spätere Zeitanker ändern die bereits geschriebenen Infotexte nicht.
+
+Für eine manuelle Nachbuchung nach Sicherung eine reservation-Zeile kopieren,
+`kind` auf `coffee` setzen und mit einer neuen ID größer als alle bisherigen
+IDs am Dateiende anfügen; person, epoch, session und uptime beibehalten.
+Nur nach Prüfung, dass der Bezug nicht bereits gebucht wurde. Anschließend
+ESP neu starten. Das Original als Nachweis stehen lassen. ID-Lücken sind erlaubt,
+doppelte oder rückläufige IDs nicht. Eine Vormerkung allein belegt keinen Bezug.
+
+Update: Nur Firmware hochladen; kein LittleFS-Upload erforderlich.
+Das vorhandene Shelly-Erkennungsskript bleibt unverändert.
 
 ## Shelly-Skript 1.1.1
 
@@ -1320,5 +1345,3 @@ Tests auf dem Rechner ersetzen keine Abnahme auf deinem ESP32.
 Von [Holger Lembke](https://github.com/holgerlembke/ESPFMfGK), eingefrorener
 Upstream-Commit `ac3b699c35705d34df06ed4a978fb5add4310463`.
 Lokale Anpassungen und Lizenz: [lib/ESPFMfGK/UPSTREAM.md](lib/ESPFMfGK/UPSTREAM.md).
-
-
