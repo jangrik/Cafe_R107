@@ -38,6 +38,26 @@ test('detects grinder alone and grinder plus heater, ignores hot water and flush
   samples(130,1);samples(1,5);samples(1400,20);samples(1,5); // isolated spike
   assert.equal(Object.keys(d.kv).length,2);
 });
+test('a second warm coffee is recognized without sustained heater power',()=>{
+  const d=detector();
+  let now=1000;
+  function samples(power,count){for(let i=0;i<count;i++){d.sample(now,power);now+=1000;}}
+  // First coffee with heating, then a warm coffee driven by the pump alone.
+  samples(130,7);samples(2,5);samples(1450,20);samples(1,5);
+  samples(1,5);
+  samples(130,7);samples(3,5);samples(55,20);samples(1,5);
+  assert.equal(Object.keys(d.kv).length,2);
+  // A rinse and hot water without a grinder must not create another coffee.
+  samples(55,15);samples(1,5);samples(1450,20);samples(1,5);
+  assert.equal(Object.keys(d.kv).length,2);
+});
+test('short pump bursts after grinding do not confirm a coffee',()=>{
+  const d=detector();
+  let now=1000;
+  function samples(power,count){for(let i=0;i<count;i++){d.sample(now,power);now+=1000;}}
+  samples(130,7);samples(3,5);samples(55,3);samples(1,5);
+  assert.equal(Object.keys(d.kv).length,0);
+});
 test('sampling interruption discards an incomplete candidate',()=>{
   const d=detector();
   for(let i=0;i<7;i++)d.sample(i*1000+1000,130);

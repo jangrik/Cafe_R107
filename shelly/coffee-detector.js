@@ -1,4 +1,4 @@
-// Cafe_R107 1.1.0 – Shelly Plug M/S Gen3, Matter must be disabled.
+// Cafe_R107 Shelly script 1.1.1 – Shelly Plug M/S Gen3, Matter must be disabled.
 // Set the key shown in Cafe_R107 > Gerät & WLAN. Enable "Run on startup".
 // The Shelly joins only the ESP access point. Relay settings are not modified.
 let ESP_URL = "http://192.168.4.1/api/shelly";
@@ -17,7 +17,9 @@ let GRIND_HIGH_W = 250;
 let HEATER_GRIND_LOW_W = 1490;
 let HEATER_GRIND_HIGH_W = 1700;
 let QUIET_W = 30;
-let FLOW_W = 350;
+// After a validated grinder phase, pumping can occur without heater power.
+// The preceding grinder and pause still distinguish this from a rinse.
+let FLOW_W = 35;
 
 let deviceInfo = Shelly.getDeviceInfo();
 let device = deviceInfo.id;
@@ -40,6 +42,8 @@ let candidateAt = 0;
 let flowAt = 0;
 let quietAt = -1;
 let flowConfirmed = false;
+let recognizedCount = 0;
+let lastDecision = "no_cycle_yet";
 
 function epochAt(now) {
   let sys = Shelly.getComponentStatus("sys");
@@ -50,7 +54,11 @@ function epochAt(now) {
   return 0;
 }
 
-function resetDetection() {
+function resetDetection(reason) {
+  if (phase !== "idle") {
+    lastDecision = reason;
+    print("Erkennung", phase, "-> idle:", reason);
+  }
   phase = "idle";
   grindAt = 0;
   grindLast = 0;
@@ -74,6 +82,7 @@ function storeBrew(endAt) {
     return;
   }
   sequence++;
+  recognizedCount++;
   let epoch = epochAt(Shelly.getUptimeMs());
   // epochAt reads current device time; compensate the quiet confirmation delay.
   if (epoch) epoch -= Math.floor((Shelly.getUptimeMs() - endAt) / 1000);
@@ -83,7 +92,7 @@ function storeBrew(endAt) {
 }
 
 function detect(now, power) {
-  if (phase !== "idle" && now - candidateAt > CYCLE_MAX_MS) resetDetection();
+  if (phase !== "idle" && now - candidateAt > CYCLE_MAX_MS) resetDetection("cycle_timeout");
   let grinder = (power >= GRIND_LOW_W && power <= GRIND_HIGH_W)
     || (power >= HEATER_GRIND_LOW_W && power <= HEATER_GRIND_HIGH_W);
   if (phase === "idle") {
@@ -94,17 +103,17 @@ function detect(now, power) {
   }
   if (phase === "grinding") {
     if (grinder) grindLast = now;
-    if (now - grindAt > GRIND_MAX_MS) { resetDetection();return; }
+    if (now - grindAt > GRIND_MAX_MS) { resetDetection("grinding_too_long");return; }
     if (!grinder && now - grindLast >= 1000) {
       if (grindLast - grindAt >= GRIND_MIN_MS && power < QUIET_W) {
         phase = "waiting";quietAt = now;
-      } else if (grindLast - grindAt < GRIND_MIN_MS || now - grindLast > 3000) resetDetection();
+      } else if (grindLast - grindAt < GRIND_MIN_MS || now - grindLast > 3000) resetDetection("grinder_pattern_rejected");
     }
     return;
   }
   if (phase === "waiting") {
-    if (now - grindLast > 25000) {resetDetection();return;}
-    // A low phase followed by sustained heater/pump operation confirms a cycle.
+    if (now - grindLast > 25000) {resetDetection("no_flow_after_grinding");return;}
+    // A low phase followed by sustained pump operation, with optional heating.
     if (power >= FLOW_W && now - quietAt >= 1000) {
       phase = "brewing";flowAt = now;quietAt = -1;
     }
@@ -116,7 +125,7 @@ function detect(now, power) {
       if (quietAt < 0) quietAt = now;
       if (now - quietAt >= FINISH_QUIET_MS) {
         if (flowConfirmed) storeBrew(quietAt);
-        resetDetection();
+        resetDetection(flowConfirmed ? "brew_confirmed" : "flow_too_short");
       }
     } else quietAt = -1;
   }
@@ -211,14 +220,14 @@ let previousSample = 0;
 Timer.set(SAMPLE_MS, true, function () {
   let now = Shelly.getUptimeMs();
   let status = Shelly.getComponentStatus("switch:0");
-  if (previousSample && now - previousSample > 2500) resetDetection();
+  if (previousSample && now - previousSample > 2500) resetDetection("sample_gap");
   previousSample = now;
   if (status && typeof status.apower === "number") {
     lastPower = status.apower;
     if (loaded) detect(now, lastPower);
     if (fault === "Leistungsmessung fehlt") fault = "";
   } else {
-    resetDetection();fault = "Leistungsmessung fehlt";
+    resetDetection("power_unavailable");fault = "Leistungsmessung fehlt";
   }
   persistNext();
   sendMessage(now);
@@ -227,8 +236,9 @@ Timer.set(SAMPLE_MS, true, function () {
 HTTPServer.registerEndpoint("status", function (request, response) {
   response.code = 200;
   response.headers = [["Content-Type", "application/json"]];
-  response.body = JSON.stringify({version: "1.1.0", device: device, ready: loaded,
+  response.body = JSON.stringify({version: "1.1.1", device: device, ready: loaded,
     state: phase, power: lastPower, queued: queue.length, error: fault,
+    recognized: recognizedCount, lastDecision: lastDecision,
     configured: API_KEY !== "HIER_SHELLY_SCHLUESSEL_EINTRAGEN"});
   response.send();
 });

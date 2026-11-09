@@ -10,6 +10,28 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
 
+## Shelly-Skript 1.1.1
+
+Nach einem erkannten Mahlvorgang mit anschließender Pause wird eine Brühphase
+ab 35 W Pumpenleistung berücksichtigt. Die bisherige Grenze von 350 W
+konnte warme Bezüge ohne längere Heizphase verwerfen. Das ist eine plausible
+Ursache für einen gemeldeten fehlenden zweiten Kaffee; eine Messkurve dieses
+konkreten Bezugs liegt noch nicht vor. Mahlmuster, Mindestdauer und
+Bezugsendebestätigung bleiben Voraussetzungen.
+
+Zum Einspielen shelly/coffee-detector.js im Shelly-Skripteditor ersetzen,
+den vorhandenen API_KEY und gegebenenfalls ESP_URL wieder eintragen,
+speichern und neu starten. Für diese Änderung genügt das Shelly-Skript.
+Vor einem Skriptneustart offene Übertragungen möglichst abschließen lassen.
+
+Die Diagnose unter /script/<id>/status zeigt zusätzlich recognized
+(erkannte und zum Speichern vorgesehene Bezüge seit Skriptstart) und
+lastDecision (zuletzt abgeschlossener oder verworfener Erkennungsversuch).
+Abbruchgründe werden auch in der Shelly-Skriptkonsole ausgegeben.
+Die Prüfung umfasst nun zwei aufeinanderfolgende simulierte Kaffees mit
+Heizleistung beim ersten und reiner Pumpenleistung beim zweiten sowie
+Spülen, Heißwasser und einen abgebrochenen kurzen Pumpenlauf.
+
 ## Neu in 1.1.1
 
 Die WLAN-Suche wartet auf das Ereignis SCAN_DONE, bevor sie die Suchergebnisse
