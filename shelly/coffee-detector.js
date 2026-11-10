@@ -1,4 +1,4 @@
-// Cafe_R107 Shelly script 1.1.2 – Shelly Plug M/S Gen3, Matter must be disabled.
+// Cafe_R107 Shelly script 1.1.3 – Shelly Plug M/S Gen3, Matter must be disabled.
 // Set the key shown in Cafe_R107 > Gerät & WLAN. Enable "Run on startup".
 // The Shelly joins only the ESP access point. Relay settings are not modified.
 let ESP_URL = "http://192.168.4.1/api/shelly";
@@ -39,11 +39,15 @@ let phase = "idle";
 let grindAt = 0;
 let grindLast = 0;
 let candidateAt = 0;
-let flowAt = 0;
 let quietAt = -1;
 let flowConfirmed = false;
+let flowActiveMs = 0;
+let flowSampleAt = 0;
 let recognizedCount = 0;
 let lastDecision = "no_cycle_yet";
+let lastDecisionAt = 0;
+let traceTimes = [];
+let tracePowers = [];
 
 function epochAt(now) {
   let sys = Shelly.getComponentStatus("sys");
@@ -57,14 +61,16 @@ function epochAt(now) {
 function resetDetection(reason) {
   if (phase !== "idle") {
     lastDecision = reason;
+    lastDecisionAt = Shelly.getUptimeMs();
     print("Erkennung", phase, "-> idle:", reason);
   }
   phase = "idle";
   grindAt = 0;
   grindLast = 0;
   quietAt = -1;
-  flowAt = 0;
   flowConfirmed = false;
+  flowActiveMs = 0;
+  flowSampleAt = 0;
 }
 
 function storeBrew(endAt) {
@@ -105,9 +111,18 @@ function detect(now, power) {
     if (grinder) grindLast = now;
     if (now - grindAt > GRIND_MAX_MS) { resetDetection("grinding_too_long");return; }
     if (!grinder && now - grindLast >= 1000) {
-      if (grindLast - grindAt >= GRIND_MIN_MS && power < QUIET_W) {
+      if (grindLast - grindAt < GRIND_MIN_MS) {
+        resetDetection("grinding_too_short");
+      } else if (power < QUIET_W) {
         phase = "waiting";quietAt = now;
-      } else if (grindLast - grindAt < GRIND_MIN_MS || now - grindLast > 3000) resetDetection("grinder_pattern_rejected");
+      } else if (power >= FLOW_W && power < HEATER_GRIND_LOW_W) {
+        // A warm machine may keep heating when the grinder stops.
+        // A validated grinder phase can lead straight into pumping/heating.
+        phase = "brewing";flowSampleAt = now;quietAt = -1;
+        print("Erkennung grinding -> brewing: Heizung/Pumpe bleibt aktiv");
+      } else if (now - grindLast > 3000) {
+        resetDetection("grinder_transition_rejected");
+      }
     }
     return;
   }
@@ -115,12 +130,15 @@ function detect(now, power) {
     if (now - grindLast > 25000) {resetDetection("no_flow_after_grinding");return;}
     // A low phase followed by sustained pump operation, with optional heating.
     if (power >= FLOW_W && now - quietAt >= 1000) {
-      phase = "brewing";flowAt = now;quietAt = -1;
+      phase = "brewing";flowSampleAt = now;quietAt = -1;
     }
     return;
   }
   if (phase === "brewing") {
-    if (power >= FLOW_W && now - flowAt >= FLOW_MIN_MS) flowConfirmed = true;
+    // Count active samples rather than elapsed time between isolated bursts.
+    if (power >= FLOW_W) flowActiveMs += Math.min(now - flowSampleAt, SAMPLE_MS);
+    flowSampleAt = now;
+    if (flowActiveMs >= FLOW_MIN_MS) flowConfirmed = true;
     if (power < 20) {
       if (quietAt < 0) quietAt = now;
       if (now - quietAt >= FINISH_QUIET_MS) {
@@ -222,6 +240,9 @@ Timer.set(SAMPLE_MS, true, function () {
   let status = Shelly.getComponentStatus("switch:0");
   if (previousSample && now - previousSample > 2500) resetDetection("sample_gap");
   previousSample = now;
+  traceTimes.push(now);
+  tracePowers.push(status && typeof status.apower === "number" ? status.apower : null);
+  if (traceTimes.length > 180) {traceTimes.shift();tracePowers.shift();}
   if (status && typeof status.apower === "number") {
     lastPower = status.apower;
     if (loaded) detect(now, lastPower);
@@ -236,10 +257,26 @@ Timer.set(SAMPLE_MS, true, function () {
 HTTPServer.registerEndpoint("status", function (request, response) {
   response.code = 200;
   response.headers = [["Content-Type", "application/json"]];
-  response.body = JSON.stringify({version: "1.1.2", device: device, ready: loaded,
+  response.body = JSON.stringify({version: "1.1.3", device: device, ready: loaded,
     state: phase, power: lastPower, queued: queue.length, error: fault,
-    recognized: recognizedCount, lastDecision: lastDecision,
+    recognized: recognizedCount, lastDecision: lastDecision, lastDecisionAtMs: lastDecisionAt,
     configured: API_KEY !== "HIER_SHELLY_SCHLUESSEL_EINTRAGEN"});
+  response.send();
+});
+HTTPServer.registerEndpoint("trace", function (request, response) {
+  let csv = "uptime_ms;leistung_W\r\n";
+  for (let i = 0; i < traceTimes.length; i++) {
+    csv += traceTimes[i] + ";";
+    if (tracePowers[i] !== null) csv += Math.round(tracePowers[i] * 10) / 10;
+    csv += "\r\n";
+  }
+  response.code = 200;
+  response.headers = [
+    ["Content-Type", "text/csv; charset=utf-8"],
+    ["Content-Disposition", "attachment; filename=cafe-r107-trace.csv"],
+    ["Cache-Control", "no-store"]
+  ];
+  response.body = csv;
   response.send();
 });
 loadQueue(0);

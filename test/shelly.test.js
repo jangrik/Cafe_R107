@@ -24,7 +24,10 @@ function detector() {
     }
   });
   vm.runInContext(source,context);
-  return {sample(t,p){now=t;power=p;timers[0]();},kv,context};
+  return {
+    sample(t,p){now=t;power=p;timers[0]();},kv,context,
+    request(name){const response={send(){}};endpoints[name]({},response);return response;}
+  };
 }
 test('detects grinder alone and grinder plus heater, ignores hot water and flushing',()=>{
   const d=detector();
@@ -57,6 +60,40 @@ test('short pump bursts after grinding do not confirm a coffee',()=>{
   function samples(power,count){for(let i=0;i<count;i++){d.sample(now,power);now+=1000;}}
   samples(130,7);samples(3,5);samples(55,3);samples(1,5);
   assert.equal(Object.keys(d.kv).length,0);
+});
+test('warm grinder cycles continue directly into heating without a quiet pause',()=>{
+  const d=detector();
+  let now=1000;
+  function samples(power,count){for(let i=0;i<count;i++){d.sample(now,power);now+=1000;}}
+  samples(1530,7);samples(1000,30);samples(1,5);
+  assert.equal(Object.keys(d.kv).length,1);
+  samples(1530,7);samples(1400,10);samples(1000,20);
+  assert.equal(JSON.parse(d.request('status').body).state,'brewing');
+  samples(1,5);
+  assert.equal(Object.keys(d.kv).length,2);
+  assert.equal(JSON.parse(d.request('status').body).lastDecision,'brew_confirmed');
+  // Heating and a rinse without a grinder still do not confirm another coffee.
+  samples(1400,20);samples(55,10);samples(1,5);
+  assert.equal(Object.keys(d.kv).length,2);
+});
+test('isolated flow bursts do not become a full brew just through elapsed time',()=>{
+  const d=detector();
+  let now=1000;
+  function samples(power,count){for(let i=0;i<count;i++){d.sample(now,power);now+=1000;}}
+  samples(130,7);samples(2,3);samples(55,1);samples(1,3);
+  samples(55,1);samples(1,5);
+  assert.equal(Object.keys(d.kv).length,0);
+  assert.equal(JSON.parse(d.request('status').body).lastDecision,'flow_too_short');
+});
+test('diagnostic CSV retains only the last 180 samples, including missing values',()=>{
+  const d=detector();
+  for(let i=1;i<=200;i++)d.sample(i*1000,1);
+  d.sample(201000,null);
+  const csv=d.request('trace').body.trimEnd().split('\r\n');
+  assert.equal(csv.length,181);
+  assert.equal(csv[0],'uptime_ms;leistung_W');
+  assert.equal(csv[1],'22000;1');
+  assert.equal(csv.at(-1),'201000;');
 });
 test('sampling interruption discards an incomplete candidate',()=>{
   const d=detector();

@@ -52,3 +52,29 @@ test('failed mode save restores checkbox and releases controls',async()=>{
   const h=modeHandler(async()=>{throw new Error('507');});
   await h.run();assert.equal(h.checkbox.checked,false);assert.equal(h.checkbox.disabled,false);assert.equal(h.button.disabled,false);
 });
+
+function overview(shelly){
+  const script=readFileSync(new URL('../data/www/app.js',import.meta.url),'utf8');
+  const start=script.indexOf("  const overview=$('#shellyOverview');");
+  const end=script.indexOf("  $('#shellyKey')",start);
+  assert(start>=0 && end>start);
+  const nodes={};
+  const $=selector=>nodes[selector]??(nodes[selector]={dataset:{},textContent:'',hidden:false});
+  vm.runInNewContext(script.slice(start,end),{$,shelly});
+  return nodes;
+}
+test('overview shows current power and brewing phase when Shelly is online',()=>{
+  const nodes=overview({online:true,state:'brewing',power:1000,error:''});
+  assert.equal(nodes['#shellyOverview'].dataset.online,'true');
+  assert.equal(nodes['#shellyOverviewPhase'].textContent,'Brühphase erkannt');
+  assert.equal(nodes['#shellyOverviewPower'].textContent,'1000 W');
+  assert.equal(nodes['#shellyOverviewError'].hidden,true);
+});
+test('overview hides stale power and exposes a Shelly error when offline',()=>{
+  const nodes=overview({online:false,state:'grinding',power:1530,error:'KVS-Lesen fehlgeschlagen'});
+  assert.equal(nodes['#shellyOverview'].dataset.online,'false');
+  assert.equal(nodes['#shellyOverviewPower'].textContent,'–');
+  assert.equal(nodes['#shellyOverviewState'].textContent,'Sofortbuchung per Chip aktiv');
+  assert.equal(nodes['#shellyOverviewError'].textContent,'KVS-Lesen fehlgeschlagen');
+  assert.equal(nodes['#shellyOverviewError'].hidden,false);
+});

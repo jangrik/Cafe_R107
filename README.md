@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.1.2
+# Cafe R107 · Version 1.1.3
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,40 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.1.3
+
+Die Erkennung kann nach einem gültigen Mahlabschnitt direkt in die Brühphase
+wechseln, wenn Pumpe oder Heizung weiterlaufen. Die vorherige Version verlangte
+an dieser Stelle eine Leistungspause unter 30 W und konnte deshalb warme
+Folgebezüge verwerfen. Aktive Pumpen-/Heizzeit wird jetzt aufsummiert, damit
+weit auseinanderliegende kurze Leistungsspitzen keine volle Brühphase ergeben.
+Der Mindestmahlabschnitt von 3 Sekunden, die maximale Mahlphase von 18 Sekunden
+und die Bestätigung des Bezugsendes bleiben Kriterien. Die Korrektur deckt den
+gemeldeten Phasenwechsel im Testmodell ab. Die Messkurve des konkreten
+fehlgeschlagenen warmen Bezugs liegt noch nicht vor.
+
+Das Shelly-Skript hält automatisch die letzten 180 Leistungsmesswerte im RAM.
+Nach einem weiteren Fehlversuch innerhalb von drei Minuten im Browser
+http://<Shelly-IP>/script/<Skript-ID>/trace öffnen und die CSV zusammen mit
+/script/<Skript-ID>/status sichern. Der Status enthält den letzten Entscheid
+und dessen Geräte-Laufzeit. Ein Neustart des Skripts leert den Messpuffer.
+Der Export ist auch während laufender Erkennung möglich.
+
+Auf der Übersicht sitzt der Shelly-Status rechts neben „Wer hat schon Kaffee?“
+über dem CSV-Button. Er zeigt Bereitschaft, Erkennungsphase, aktuelle
+Wirkleistung und gemeldete Fehler. Bei fehlendem gesunden Lebenszeichen wird
+die Leistung ausgeblendet. Die Aktualisierung folgt dem vorhandenen
+Acht-Sekunden-Intervall. Dunkle Buttons werden beim Hover deutlich brauner
+mit Schatten; helle Buttons erhalten einen goldenen Hintergrund und
+kräftigeren Rand. Der Fokusrahmen für Tastaturbedienung bleibt sichtbar.
+
+Zum Update Firmware 1.1.3 installieren und die Dateien data/www/index.html,
+data/www/app.js und data/www/style.css einzeln nach /www/ hochladen.
+Das Shelly-Skript durch shelly/coffee-detector.js ersetzen, den eigenen
+API_KEY und gegebenenfalls ESP_URL übernehmen, speichern und neu starten.
+Anschließend die ESP-Webseite vollständig neu laden. Das gesamte
+Dateisystem-Image würde die gespeicherten Gerätedaten ersetzen.
 
 ## Neu in Firmware 1.1.2: Journal der Vormerkungen
 

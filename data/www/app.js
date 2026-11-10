@@ -38,6 +38,14 @@ async function loadStatus(){
   }
   if(!status.apClientList?.length)empty(clients,'Keine AP-Clients verbunden.',3);
   const shelly=status.shelly||{};
+  const overview=$('#shellyOverview');
+  overview.dataset.online=String(Boolean(shelly.online));
+  $('#shellyOverviewState').textContent=shelly.online?'Erkennung aktiv':'Sofortbuchung per Chip aktiv';
+  const phases={idle:'Wartet auf Kaffee',grinding:'Mahlen erkannt',waiting:'Wartet auf Brühphase',brewing:'Brühphase erkannt'};
+  $('#shellyOverviewPhase').textContent=shelly.online?(phases[shelly.state]||shelly.state||'Bereit'):'Shelly nicht bereit oder nicht erreichbar';
+  $('#shellyOverviewPower').textContent=shelly.online && Number.isFinite(shelly.power)?Math.round(shelly.power)+' W':'–';
+  $('#shellyOverviewError').textContent=shelly.error||'';
+  $('#shellyOverviewError').hidden=!shelly.error;
   $('#shellyKey').textContent=shelly.key||'Nicht verfügbar';
   $('#shellyStatus').textContent=(shelly.online?'Erkennung aktiv':'Sofortbuchung per Chip aktiv')
     +(shelly.device?' · '+shelly.device:'')+(shelly.state?' · '+shelly.state:'')
