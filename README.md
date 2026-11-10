@@ -17,6 +17,10 @@ wechseln, wenn Pumpe oder Heizung weiterlaufen. Die vorherige Version verlangte
 an dieser Stelle eine Leistungspause unter 30 W und konnte deshalb warme
 Folgebezüge verwerfen. Aktive Pumpen-/Heizzeit wird jetzt aufsummiert, damit
 weit auseinanderliegende kurze Leistungsspitzen keine volle Brühphase ergeben.
+Eine kurze erste Heiz-/Pumpenphase mit anschließender Vorbrühpause wartet auf
+die Fortsetzung, statt den validierten Mahlabschnitt sofort zu verwerfen.
+Beide ursprünglichen EP0800-CSV-Messreihen liegen als Testdaten unter
+test/fixtures und werden bei jedem JavaScript-Testlauf nachgespielt.
 Der Mindestmahlabschnitt von 3 Sekunden, die maximale Mahlphase von 18 Sekunden
 und die Bestätigung des Bezugsendes bleiben Kriterien. Die Korrektur deckt den
 gemeldeten Phasenwechsel im Testmodell ab. Die Messkurve des konkreten

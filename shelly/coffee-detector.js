@@ -142,8 +142,16 @@ function detect(now, power) {
     if (power < 20) {
       if (quietAt < 0) quietAt = now;
       if (now - quietAt >= FINISH_QUIET_MS) {
-        if (flowConfirmed) storeBrew(quietAt);
-        resetDetection(flowConfirmed ? "brew_confirmed" : "flow_too_short");
+        if (flowConfirmed) {
+          storeBrew(quietAt);
+          resetDetection("brew_confirmed");
+        } else if (now - grindLast <= 25000) {
+          // A brief heater/pump pulse followed by a pre-infusion pause
+          // can precede the actual flow, as in the recorded small coffee.
+          phase = "waiting";flowActiveMs = 0;flowSampleAt = 0;
+          lastDecision = "preinfusion_pause";lastDecisionAt = now;
+          print("Erkennung: Vorbruehpause, wartet auf Fortsetzung");
+        } else resetDetection("flow_too_short");
       }
     } else quietAt = -1;
   }

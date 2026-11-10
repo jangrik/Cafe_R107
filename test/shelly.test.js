@@ -83,7 +83,10 @@ test('isolated flow bursts do not become a full brew just through elapsed time',
   samples(130,7);samples(2,3);samples(55,1);samples(1,3);
   samples(55,1);samples(1,5);
   assert.equal(Object.keys(d.kv).length,0);
-  assert.equal(JSON.parse(d.request('status').body).lastDecision,'flow_too_short');
+  assert.equal(JSON.parse(d.request('status').body).lastDecision,'preinfusion_pause');
+  samples(1,30);
+  assert.equal(Object.keys(d.kv).length,0);
+  assert.equal(JSON.parse(d.request('status').body).lastDecision,'no_flow_after_grinding');
 });
 test('diagnostic CSV retains only the last 180 samples, including missing values',()=>{
   const d=detector();
@@ -139,3 +142,16 @@ test('queued event survives restart and is deleted only after matching ESP ackno
   httpCallback({code:200,body:'{"ok":true,"event":"previous-1"}'},0);
   assert.equal(deleted,1);
 });
+
+for(const [fixture,expected] of [['ep0800-coffee.csv',2],['ep0800-hotwater.csv',0]]){
+  test('recorded EP0800 trace '+fixture+' yields '+expected+' coffees',()=>{
+    const d=detector();
+    const csv=fs.readFileSync(new URL('./fixtures/'+fixture,import.meta.url),'utf8');
+    for(const row of csv.trim().split(/\r?\n/).slice(1)){
+      const [time,power]=row.split(';');
+      if(power==='')continue;
+      d.sample(Number(time),Number(power));
+    }
+    assert.equal(Object.keys(d.kv).length,expected);
+  });
+}
