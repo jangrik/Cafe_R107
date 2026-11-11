@@ -1,4 +1,4 @@
-// Cafe_R107 Shelly script 1.1.3 – Shelly Plug M/S Gen3, Matter must be disabled.
+// Cafe_R107 Shelly script 1.1.4 – Shelly Plug M/S Gen3, Matter must be disabled.
 // Set the key shown in Cafe_R107 > Gerät & WLAN. Enable "Run on startup".
 // The Shelly joins only the ESP access point. Relay settings are not modified.
 let ESP_URL = "http://192.168.4.1/api/shelly";
@@ -48,6 +48,8 @@ let lastDecision = "no_cycle_yet";
 let lastDecisionAt = 0;
 let traceTimes = [];
 let tracePowers = [];
+let traceCapacity = 180;
+let traceNext = 0;
 
 function epochAt(now) {
   let sys = Shelly.getComponentStatus("sys");
@@ -136,7 +138,11 @@ function detect(now, power) {
   }
   if (phase === "brewing") {
     // Count active samples rather than elapsed time between isolated bursts.
-    if (power >= FLOW_W) flowActiveMs += Math.min(now - flowSampleAt, SAMPLE_MS);
+    if (power >= FLOW_W) {
+      let elapsed = now - flowSampleAt;
+      if (elapsed > SAMPLE_MS) elapsed = SAMPLE_MS;
+      flowActiveMs += elapsed;
+    }
     flowSampleAt = now;
     if (flowActiveMs >= FLOW_MIN_MS) flowConfirmed = true;
     if (power < 20) {
@@ -248,9 +254,9 @@ Timer.set(SAMPLE_MS, true, function () {
   let status = Shelly.getComponentStatus("switch:0");
   if (previousSample && now - previousSample > 2500) resetDetection("sample_gap");
   previousSample = now;
-  traceTimes.push(now);
-  tracePowers.push(status && typeof status.apower === "number" ? status.apower : null);
-  if (traceTimes.length > 180) {traceTimes.shift();tracePowers.shift();}
+  traceTimes[traceNext] = now;
+  tracePowers[traceNext] = status && typeof status.apower === "number" ? status.apower : null;
+  traceNext = (traceNext + 1) % traceCapacity;
   if (status && typeof status.apower === "number") {
     lastPower = status.apower;
     if (loaded) detect(now, lastPower);
@@ -265,7 +271,7 @@ Timer.set(SAMPLE_MS, true, function () {
 HTTPServer.registerEndpoint("status", function (request, response) {
   response.code = 200;
   response.headers = [["Content-Type", "application/json"]];
-  response.body = JSON.stringify({version: "1.1.3", device: device, ready: loaded,
+  response.body = JSON.stringify({version: "1.1.4", device: device, ready: loaded,
     state: phase, power: lastPower, queued: queue.length, error: fault,
     recognized: recognizedCount, lastDecision: lastDecision, lastDecisionAtMs: lastDecisionAt,
     configured: API_KEY !== "HIER_SHELLY_SCHLUESSEL_EINTRAGEN"});
@@ -273,9 +279,11 @@ HTTPServer.registerEndpoint("status", function (request, response) {
 });
 HTTPServer.registerEndpoint("trace", function (request, response) {
   let csv = "uptime_ms;leistung_W\r\n";
+  let oldest = traceTimes.length === traceCapacity ? traceNext : 0;
   for (let i = 0; i < traceTimes.length; i++) {
-    csv += traceTimes[i] + ";";
-    if (tracePowers[i] !== null) csv += Math.round(tracePowers[i] * 10) / 10;
+    let index = (oldest + i) % traceCapacity;
+    csv += traceTimes[index] + ";";
+    if (tracePowers[index] !== null) csv += Math.round(tracePowers[index] * 10) / 10;
     csv += "\r\n";
   }
   response.code = 200;
