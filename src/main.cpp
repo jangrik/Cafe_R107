@@ -123,6 +123,7 @@ bool latched=false, acceptedOnce=false;
 enum class Screen { Boot, Idle, Result, Ranking };
 Screen currentScreen=Screen::Boot;
 String lastNetworkLine, lastCupTime;
+bool lastShellyOnline=false;
 uint64_t lastSteamSecond=UINT64_MAX;
 cafe::RankingCycle rankingCycle;
 cafe::BacklightTimer backlightTimer;
@@ -389,13 +390,24 @@ void drawSteam() {
     lcd.drawLine(x-bend,70,x,62,CREAM);
   }
 }
+void drawShellyIcon(bool online) {
+  digitalWrite(pins::RFID_CS,HIGH);
+  lcd.fillRect(200,59,20,12,BG);
+  uint16_t color=online?0x77AE:ST77XX_RED;
+  // A closed link when online, two separated links when offline.
+  int right=online?208:211;
+  lcd.drawRoundRect(200,60,9,5,2,color);
+  lcd.drawRoundRect(right,65,9,5,2,color);
+  if(online)lcd.drawLine(205,67,212,62,color);
+  lastShellyOnline=online;
+}
 void idleScreen() {
   frame();
   // Wide enough for a five-character HH:MM at text size 3.
   lcd.drawRoundRect(54,92,114,62,9,CREAM);
   lcd.drawRoundRect(167,104,23,35,8,CREAM);
   lcd.drawFastHLine(44,160,155,GOLD);
-  drawCupTime(); drawSteam();
+  drawCupTime(); drawSteam(); drawShellyIcon(shellyOnline());
   center("Zeit fuer Kaffee?",173,2,CREAM);
   center(storageError.length() ? "Speicher pruefen!" : (readerOK ? "Bitte Chip vorhalten" : "RFID nicht bereit"),197,2,storageError.length()?ST77XX_RED:GOLD);
   lastNetworkLine=networkLine(); center(lastNetworkLine,224,1,CREAM);
@@ -707,6 +719,8 @@ void serviceDisplay() {
   if(currentScreen==Screen::Ranking)idleScreen();
   if(currentScreen!=Screen::Idle)return;
   if(networkLine()!=lastNetworkLine) {idleScreen();return;}
+  bool online=shellyOnline();
+  if(online!=lastShellyOnline)drawShellyIcon(online);
   if(uptimeMs()/1000!=lastSteamSecond) {
     if(cupTime()!=lastCupTime)drawCupTime();
     drawSteam();
@@ -1042,6 +1056,10 @@ void apiShelly() {
   if(fallback)e["fallback"]=fallback;
   if(!appendRecord(e)) {error(507,"Bezug nicht gespeichert");return;}
   rememberBrewRef(ref);
+  if(b.live && !backlightOn) {
+    backlightTimer.chip(millis());
+    serviceBacklight();
+  }
   if(fallback) {matchedFallbacks.insert(fallback);sendJson(out);return;}
   openBrews[ref]=b;
   bool reservedMatches=age>=0 && reservedPerson.length() &&
