@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.1.3
+# Cafe R107 · Version 1.1.5
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,22 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.1.5
+
+Der Shelly sendet die letzten fünf Sekundenmesswerte mit jedem Lebenszeichen.
+Im ESP bleibt bis zu eine Stunde im RAM. Unter **Leistungsverlauf** lassen sich
+Leistung und Erkennungsphasen ansehen, das Zeitfenster verschieben und bestätigte
+Bezüge an grünen Markierungen erkennen. Die CSV unter
+`/api/power.csv?download=1` enthält den gesamten verfügbaren Verlauf.
+Längere Verbindungsunterbrechungen hinterlassen Lücken. Ein ESP-Neustart leert
+den Verlauf. Das Verbindungssymbol auf dem Gerät ist jetzt 34 × 20 Pixel groß.
+
+Für das Update die Firmware installieren, dann `index.html`, `app.js` und
+`style.css` aus `data/www/` im Dateimanager einzeln in `/www/` ersetzen.
+Das Shelly-Skript `shelly/coffee-detector.js` aktualisieren, dabei `API_KEY`
+und gegebenenfalls `ESP_URL` übernehmen. Das Skript starten und die Webseite
+neu laden. Der lokale Shelly-Puffer bleibt bei 180 Messwerten.
 
 ## Neu in 1.1.3
 

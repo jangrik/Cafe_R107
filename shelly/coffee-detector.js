@@ -1,4 +1,4 @@
-// Cafe_R107 Shelly script 1.1.4 – Shelly Plug M/S Gen3, Matter must be disabled.
+// Cafe_R107 Shelly script 1.1.5 – Shelly Plug M/S Gen3, Matter must be disabled.
 // Set the key shown in Cafe_R107 > Gerät & WLAN. Enable "Run on startup".
 // The Shelly joins only the ESP access point. Relay settings are not modified.
 let ESP_URL = "http://192.168.4.1/api/shelly";
@@ -50,6 +50,9 @@ let traceTimes = [];
 let tracePowers = [];
 let traceCapacity = 180;
 let traceNext = 0;
+// Keep the phase only for the five samples sent with the next heartbeat.
+let recentPhases = [];
+let recentNext = 0;
 
 function epochAt(now) {
   let sys = Shelly.getComponentStatus("sys");
@@ -218,6 +221,19 @@ function sendMessage(now) {
   }
   let payload = {type: "heartbeat", device: device, mac: deviceInfo.mac, healthy: loaded && !fault && queue.length < MAX_EVENTS,
     power: lastPower, state: phase, error: fault};
+  if (heartbeat) {
+    let samples = [];
+    let count = traceTimes.length;
+    if (count > 5) count = 5;
+    for (let i = count; i > 0; i--) {
+      let index = (traceNext + traceCapacity - i) % traceCapacity;
+      let watts = tracePowers[index];
+      if (watts !== null && watts >= 0 && watts <= 10000) watts = Math.round(watts);
+      else watts = null;
+      samples.push([now - traceTimes[index], watts, recentPhases[(recentNext + 5 - i) % 5]]);
+    }
+    payload.samples = samples;
+  }
   if (item !== null) {
     let event = item.value;
     let age = event.boot === boot ? now - event.end : -1;
@@ -254,9 +270,6 @@ Timer.set(SAMPLE_MS, true, function () {
   let status = Shelly.getComponentStatus("switch:0");
   if (previousSample && now - previousSample > 2500) resetDetection("sample_gap");
   previousSample = now;
-  traceTimes[traceNext] = now;
-  tracePowers[traceNext] = status && typeof status.apower === "number" ? status.apower : null;
-  traceNext = (traceNext + 1) % traceCapacity;
   if (status && typeof status.apower === "number") {
     lastPower = status.apower;
     if (loaded) detect(now, lastPower);
@@ -264,6 +277,15 @@ Timer.set(SAMPLE_MS, true, function () {
   } else {
     resetDetection("power_unavailable");fault = "Leistungsmessung fehlt";
   }
+  traceTimes[traceNext] = now;
+  tracePowers[traceNext] = status && typeof status.apower === "number" ? status.apower : null;
+  let phaseCode = 1;
+  if (phase === "grinding") phaseCode = 2;
+  else if (phase === "waiting") phaseCode = 3;
+  else if (phase === "brewing") phaseCode = 4;
+  recentPhases[recentNext] = phaseCode;
+  recentNext = (recentNext + 1) % 5;
+  traceNext = (traceNext + 1) % traceCapacity;
   persistNext();
   sendMessage(now);
 });
@@ -271,7 +293,7 @@ Timer.set(SAMPLE_MS, true, function () {
 HTTPServer.registerEndpoint("status", function (request, response) {
   response.code = 200;
   response.headers = [["Content-Type", "application/json"]];
-  response.body = JSON.stringify({version: "1.1.4", device: device, ready: loaded,
+  response.body = JSON.stringify({version: "1.1.5", device: device, ready: loaded,
     state: phase, power: lastPower, queued: queue.length, error: fault,
     recognized: recognizedCount, lastDecision: lastDecision, lastDecisionAtMs: lastDecisionAt,
     configured: API_KEY !== "HIER_SHELLY_SCHLUESSEL_EINTRAGEN"});

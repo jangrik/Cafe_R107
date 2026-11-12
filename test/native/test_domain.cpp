@@ -2,6 +2,7 @@
 #include "TofQuality.h"
 #include "NetworkLogic.h"
 #include "CoffeeLogic.h"
+#include "PowerHistory.h"
 #include "DisplayLogic.h"
 #include "Backlight.h"
 #include "HealthLogic.h"
@@ -9,6 +10,22 @@
 #include <cstdlib>
 #include <iostream>
 int main(){
+ cafe::PowerHistory powerHistory;
+ powerHistory.advance(4);
+ powerHistory.markBrew(2);
+ powerHistory.record(2,1401,4);
+ powerHistory.record(4,1,1);
+ assert(powerHistory.get(2).wattsPlusOne==1401 && powerHistory.get(2).flags==(4|cafe::PowerHistory::Brew));
+ assert(powerHistory.get(3).flags==0 && powerHistory.get(4).wattsPlusOne==1);
+ powerHistory.advance(3601);
+ assert(powerHistory.get(2).flags!=0);
+ powerHistory.advance(3602);
+ powerHistory.record(2,30,1);
+ assert(powerHistory.get(2).flags==0 && powerHistory.get(3602).flags==0);
+ powerHistory.markBrew(3602);
+ powerHistory.advance(7202);
+ assert(powerHistory.get(7202).flags==0);
+
  // Decode the real ST result-block layout, including fractional rates/SPADs.
  const uint8_t resultBlock[12]={0x5f,0,0x12,0x80,0,0,0x01,0x40,0x00,0x20,0x01,0x2c};
  auto quality=cafe::TofQuality::decode(resultBlock);

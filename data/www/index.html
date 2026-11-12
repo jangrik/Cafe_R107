@@ -5,7 +5,7 @@
 <header><div class="brand"><span class="cup" aria-hidden="true">☕</span><div><span class="eyebrow">UNSER BÜROKAFFEE</span><h1>Cafe R107<span>.</span></h1></div></div><div class="connection"><span id="dot" class="dot"></span><span id="connection">Verbinde …</span><small id="version"></small></div></header>
 <main>
 <div class="intro"><div><p class="eyebrow">EINE KLEINE PAUSE. GUT ERFASST.</p><h2>Wer hat schon Kaffee?</h2><p>Chip vorhalten, Kaffee genießen. Hier behalten wir den Überblick.</p></div><div class="intro-actions"><aside id="shellyOverview" class="shelly-overview" aria-label="Shelly-Kaffeeerkennung"><span class="eyebrow">SHELLY-KAFFEEERKENNUNG</span><strong id="shellyOverviewState">Verbinde …</strong><div class="shelly-reading"><span id="shellyOverviewPhase">–</span><span id="shellyOverviewPower">–</span></div><small id="shellyOverviewError" hidden></small></aside><a class="button secondary" href="/api/export.csv">CSV herunterladen ↗</a></div></div>
-<nav aria-label="Bereiche"><button type="button" class="active" data-tab="overview">Übersicht</button><button type="button" data-tab="people">Personen & Chips <span id="pendingBadge" class="badge" hidden>0</span></button><button type="button" data-tab="device">Gerät & WLAN</button></nav>
+<nav aria-label="Bereiche"><button type="button" class="active" data-tab="overview">Übersicht</button><button type="button" data-tab="people">Personen & Chips <span id="pendingBadge" class="badge" hidden>0</span></button><button type="button" data-tab="device">Gerät & WLAN</button><button type="button" data-tab="power">Leistungsverlauf</button></nav>
 <div id="notice" role="status" hidden></div><div id="health" class="warning" role="alert" hidden></div>
 <section id="overview" class="tab">
 <div class="metrics"><article><span>Heute</span><strong id="today">–</strong><small>Kaffees im Büro</small></article><article><span>Kalenderwoche</span><strong id="weekTotal">–</strong><small id="weekLabel">–</small></article><article><span>Monat</span><strong id="monthTotal">–</strong><small id="monthLabel">–</small></article><article class="dark"><span>Seit dem ersten Kaffee</span><strong id="total">–</strong><small>Alle Personen zusammen</small></article></div>
@@ -23,6 +23,17 @@
 <article class="panel"><h3>Verbundene AP-Clients</h3><p class="hint">Geräte im WLAN dieses ESP. Vom Notebook im selben ESP-WLAN lässt sich die angezeigte IP direkt öffnen. Die Erkennung „Shelly“ setzt ein gültiges Lebenszeichen voraus.</p><div class="tablewrap"><table><thead><tr><th>Gerät</th><th>MAC-Adresse</th><th>IP-Adresse</th></tr></thead><tbody id="apClientList"></tbody></table></div></article>
 <article class="panel"><h3>Shelly-Kaffeeerkennung</h3><p id="shellyStatus"></p><p class="hint">Den folgenden Schlüssel im Shelly-Skript als API_KEY eintragen. Das Skript sendet alle 5 Sekunden ein Lebenszeichen. Nach mehr als 15 Sekunden ohne gesundes Lebenszeichen bucht der Chip sofort.</p><code id="shellyKey"></code><p class="hint">Bei laufender Erkennung gilt ein vorgehaltener Chip 120 Sekunden für einen Bezug. Bis 10 Sekunden nach Bezugsende kann der Chip nachgereicht werden. Danach erinnert der Summer bis zu 30 Sekunden; ein Chip beendet die Erinnerung. Bezüge ohne Chip erscheinen als „Ohne Zuordnung“ im Verlauf.</p></article>
 <article class="panel"><h3>Sichern & aktualisieren</h3><p>Im Dateimanager auf Port 8080 lässt sich das gesamte LittleFS sichern. Die CSV ist ein lesbarer Export; zur vollständigen Wiederherstellung werden auch Konfiguration, Personen und das Journal benötigt.</p><p><strong>Ein „Upload Filesystem Image“ überschreibt alle gespeicherten Daten.</strong> Für spätere Änderungen einzelne Webdateien im Dateimanager hochladen. Nach manuellen Änderungen an Konfiguration, Personen oder Journal das Gerät neu starten.</p></article>
+</section>
+<section id="power" class="tab" hidden>
+<article class="panel"><div class="panelhead"><h3>Shelly-Leistungsverlauf</h3><a class="button secondary" href="/api/power.csv?download=1">Messwerte als CSV</a></div>
+<div class="filters power-controls">
+<label>Zeitraum<select id="powerSpan"><option value="60">1 Stunde</option><option value="15">15 Minuten</option><option value="5">5 Minuten</option><option value="1">1 Minute</option></select></label>
+<label id="powerOffsetLabel" hidden>Zeitfenster verschieben <output id="powerOffsetValue"></output><input id="powerOffset" type="range" min="0" max="0" step="1" value="0"></label>
+</div>
+<p id="powerStatus" class="hint" role="status">Warte auf Messwerte …</p>
+<canvas id="powerChart" role="img" aria-label="Leistung in Watt, Erkennungsphasen und bestätigte Kaffeebezüge über der Zeit"></canvas>
+<ul class="power-legend"><li style="--key:#55463b">Leistung</li><li style="--key:#777068">Leerlauf</li><li style="--key:#b46a1b">Mahlen</li><li style="--key:#7955a0">Warten</li><li style="--key:#2d6993">Brühen</li><li style="--key:#307557">Bezug bestätigt</li></ul>
+</article>
 </section>
 <footer>Cafe R107 · Kleine Pause, klare Übersicht.<span>RFID · ESP32 · LittleFS</span></footer>
 </main></body></html>

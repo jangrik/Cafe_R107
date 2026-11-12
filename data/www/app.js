@@ -116,3 +116,120 @@ $('#weekSelect').addEventListener('change',()=>loadReport().catch(e=>notify(e.me
 $('#older').addEventListener('click',()=>{before=oldest;loadHistory().catch(e=>notify(e.message,true));});$('#newest').addEventListener('click',()=>{before=null;loadHistory().catch(e=>notify(e.message,true));});
 refresh();setInterval(()=>{if(!document.hidden)refresh();},8000);
 
+
+const powerChart=$('#powerChart');
+const powerSpan=$('#powerSpan'),powerOffset=$('#powerOffset');
+const powerSamples=new Map();
+const phaseColors={idle:'#777068',grinding:'#b46a1b',waiting:'#7955a0',brewing:'#2d6993'};
+const powerClock=new Intl.DateTimeFormat('de-DE',{timeZone:'Europe/Berlin',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+let powerSession='',powerNow=0,powerEpoch=0,loadingPower=false;
+
+function drawPowerChart(){
+  const span=Number(powerSpan.value)*60,offset=Number(powerOffset.value);
+  const end=powerNow-offset,start=end-span+1;
+  const width=powerChart.clientWidth,height=powerChart.clientHeight;
+  if(!width||!height)return;
+  const ratio=window.devicePixelRatio||1;
+  powerChart.width=Math.round(width*ratio);
+  powerChart.height=Math.round(height*ratio);
+  const ctx=powerChart.getContext('2d');
+  ctx.scale(ratio,ratio);
+  ctx.font='12px sans-serif';
+  const left=49,right=width-29,top=14,bottom=height-49;
+  const x=second=>left+(second-start)/(span-1)*(right-left);
+  let maxPower=0;
+  for(let second=start;second<=end;second++)maxPower=Math.max(maxPower,powerSamples.get(second)?.watts??0);
+  const step=maxPower<=100?25:maxPower<=500?125:maxPower<=2000?500:2500;
+  const limit=Math.max(step*2,Math.ceil(maxPower/step)*step);
+  const y=watts=>bottom-watts/limit*(bottom-top);
+
+  ctx.textAlign='right';
+  for(let watts=0;watts<=limit;watts+=step){
+    const row=y(watts);
+    ctx.strokeStyle='#ded5ca';ctx.beginPath();ctx.moveTo(left,row);ctx.lineTo(right,row);ctx.stroke();
+    ctx.fillStyle='#55463b';ctx.fillText(watts+' W',left-5,row+4);
+  }
+
+  const ticks=width<530?3:5;
+  ctx.textAlign='center';
+  for(let i=0;i<ticks;i++){
+    const second=start+Math.round(i*(span-1)/(ticks-1));
+    const label=powerEpoch?powerClock.format((powerEpoch-(powerNow-second))*1000):'−'+(powerNow-second)+' s';
+    ctx.fillText(label,Math.min(width-27,Math.max(27,x(second))),bottom+34);
+  }
+
+  ctx.save();
+  ctx.beginPath();ctx.rect(left,top,right-left+1,bottom-top+16);ctx.clip();
+  ctx.strokeStyle='#55463b';ctx.lineWidth=1.35;
+  ctx.beginPath();
+  let continuous=false,visible=0;
+  for(let second=start;second<=end;second++){
+    const sample=powerSamples.get(second);
+    if(!sample||sample.watts===null){continuous=false;continue;}
+    const col=x(second),row=y(sample.watts);
+    if(continuous)ctx.lineTo(col,row);
+    else {ctx.moveTo(col,row);ctx.lineTo(col+.4,row);}
+    continuous=true;visible++;
+  }
+  ctx.stroke();
+  for(let second=start;second<=end;second++){
+    const sample=powerSamples.get(second);
+    if(!sample)continue;
+    const col=x(second);
+    if(phaseColors[sample.phase]){
+      ctx.fillStyle=phaseColors[sample.phase];
+      ctx.fillRect(col,bottom+5,Math.max(1,(right-left)/(span-1)),8);
+    }
+    if(sample.brew){
+      ctx.strokeStyle='#307557';ctx.setLineDash([4,3]);
+      ctx.beginPath();ctx.moveTo(col,top);ctx.lineTo(col,bottom+14);ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.restore();
+  $('#powerStatus').textContent=visible
+    ? (powerEpoch?'Uhrzeit Berlin':'Zeit relativ zur letzten Aktualisierung')+' · Lücken zeigen fehlende Messwerte.'
+    : 'Keine Leistungsmesswerte in diesem Zeitraum.';
+}
+
+function updatePowerWindow(){
+  const max=60-Number(powerSpan.value);
+  powerOffset.max=max;
+  $('#powerOffsetLabel').hidden=!max;
+  $('#powerOffsetValue').textContent=Number(powerOffset.value)?powerOffset.value+' min zurück':'Aktuell';
+  drawPowerChart();
+}
+
+async function loadPowerHistory(){
+  if(loadingPower || document.hidden || $('#power').hidden)return;
+  loadingPower=true;
+  try{
+    const query=new URLSearchParams({session:powerSession,since:powerNow});
+    const response=await fetch('/api/power.csv?'+query,{cache:'no-store'});
+    if(!response.ok)throw new Error('Messwerte konnten nicht geladen werden.');
+    const session=response.headers.get('X-Cafe-Session');
+    const now=Number(response.headers.get('X-Cafe-Uptime'));
+    const epoch=Number(response.headers.get('X-Cafe-Epoch'));
+    if(!session||!Number.isInteger(now))throw new Error('Der ESP liefert keinen Leistungsverlauf.');
+    const rows=(await response.text()).trimEnd().split(/\r?\n/);
+    if(rows.shift()!=='uptime_s;epoch;leistung_W;phase;kaffee')throw new Error('Messdaten sind nicht lesbar.');
+    if(session!==powerSession || now<powerNow)powerSamples.clear();
+    powerSession=session;powerNow=now;powerEpoch=epoch;
+    for(const row of rows){
+      const [second,,watts,phase,brew]=row.split(';');
+      powerSamples.set(Number(second),{watts:watts===''?null:Number(watts),phase,brew:brew==='1'});
+    }
+    for(const second of powerSamples.keys())if(second<now-3599)powerSamples.delete(second);
+    drawPowerChart();
+  }catch(e){$('#powerStatus').textContent=e.message;}
+  finally{loadingPower=false;}
+}
+
+powerSpan.addEventListener('change',updatePowerWindow);
+powerOffset.addEventListener('input',updatePowerWindow);
+document.querySelector('[data-tab="power"]').addEventListener('click',()=>{
+  updatePowerWindow();
+  loadPowerHistory();
+});
+window.addEventListener('resize',drawPowerChart);
+setInterval(loadPowerHistory,5000);

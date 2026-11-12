@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../shelly/coffee-detector.js',import.meta.url),'utf8');
 function detector() {
   let now=0,power=0;
-  const kv={},timers=[],endpoints={};
+  const kv={},timers=[],endpoints={},messages=[];
   const context=vm.createContext({
     Math,JSON,print:()=>{},
     Timer:{set:(ms,repeat,fn)=>{timers.push(fn);return timers.length;}},
@@ -18,17 +18,32 @@ function detector() {
       call:(method,args,callback)=>{
         if(method==='KVS.GetMany')callback({items:{},total:0},0);
         else if(method==='KVS.Set'){kv[args.key]=args.value;callback({},0);}
-        else if(method==='HTTP.Request')callback(null,1);
+        else if(method==='HTTP.Request'){messages.push(JSON.parse(args.body));callback(null,1);}
         else throw Error(method);
       }
     }
   });
   vm.runInContext(source,context);
   return {
-    sample(t,p){now=t;power=p;timers[0]();},kv,context,
+    sample(t,p){now=t;power=p;timers[0]();},kv,context,messages,
     request(name){const response={send(){}};endpoints[name]({},response);return response;}
   };
 }
+test('heartbeat carries five individual samples with ages, phases and missing power',()=>{
+  const d=detector();
+  vm.runInContext('API_KEY = "test"',d.context);
+  for(let second=1;second<=181;second++)d.sample(second*1000,1);
+  d.sample(182000,130.4);
+  d.sample(183000,132.7);
+  d.sample(184000,null);
+  d.sample(185000,1);
+  d.sample(186000,0);
+  const heartbeats=d.messages.filter(message=>message.type==='heartbeat');
+  assert.deepEqual(heartbeats[0].samples,[[0,1,1]]);
+  assert.deepEqual(heartbeats.at(-1).samples,[
+    [4000,130,2],[3000,133,2],[2000,null,1],[1000,1,1],[0,0,1]
+  ]);
+});
 test('detects grinder alone and grinder plus heater, ignores hot water and flushing',()=>{
   const d=detector();
   let now=1000;

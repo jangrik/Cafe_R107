@@ -12,6 +12,7 @@
 #include <freertos/queue.h>
 #include "NetworkLogic.h"
 #include "CoffeeLogic.h"
+#include "PowerHistory.h"
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -113,6 +114,7 @@ String reservedPerson,shellyDevice,shellyIP,shellyMac,shellyError,shellyState;
 uint64_t reservedAt=0,shellySeenAt=0;
 bool shellySeen=false,shellyHealthy=false;
 float shellyPower=0;
+cafe::PowerHistory powerHistory;
 uint64_t uptimeMs();
 bool shellyOnline() {return cafe::shellyHeartbeatFresh(shellySeen,shellyHealthy,uptimeMs()-shellySeenAt);}
 
@@ -392,13 +394,13 @@ void drawSteam() {
 }
 void drawShellyIcon(bool online) {
   digitalWrite(pins::RFID_CS,HIGH);
-  lcd.fillRect(200,59,20,12,BG);
+  lcd.fillRect(188,55,34,20,BG);
   uint16_t color=online?0x77AE:ST77XX_RED;
   // A closed link when online, two separated links when offline.
-  int right=online?208:211;
-  lcd.drawRoundRect(200,60,9,5,2,color);
-  lcd.drawRoundRect(right,65,9,5,2,color);
-  if(online)lcd.drawLine(205,67,212,62,color);
+  int right=online?202:206;
+  lcd.drawRoundRect(189,56,15,8,3,color);
+  lcd.drawRoundRect(right,66,15,8,3,color);
+  if(online)lcd.drawLine(198,70,208,60,color);
   lastShellyOnline=online;
 }
 void idleScreen() {
@@ -1011,6 +1013,19 @@ void apiShelly() {
     shellyDevice=device;shellyIP=web.client().remoteIP().toString();
     shellyMac=d["mac"]|"";shellyMac.replace(":","");shellyMac.toUpperCase();
     shellyPower=d["power"]|0.0f;shellyError=d["error"]|"";shellyState=d["state"]|"";
+    auto samples=d["samples"].as<JsonArrayConst>();
+    if(samples.size()<=5) {
+      powerHistory.advance(shellySeenAt/1000);
+      for(JsonArrayConst sample:samples) {
+        if(sample.size()!=3 || !sample[0].is<uint32_t>() || !sample[2].is<uint8_t>())continue;
+        uint32_t age=sample[0].as<uint32_t>();
+        uint8_t phase=sample[2].as<uint8_t>();
+        if(age>15000 || age>shellySeenAt || phase<1 || phase>4)continue;
+        if(!sample[1].isNull() && (!sample[1].is<uint16_t>() || sample[1].as<uint16_t>()>10000))continue;
+        uint16_t wattsPlusOne=sample[1].isNull()?0:sample[1].as<uint16_t>()+1;
+        powerHistory.record((shellySeenAt-age)/1000,wattsPlusOne,phase);
+      }
+    }
     sendJson(out);return;
   }
   String event=d["event"]|"";
@@ -1056,6 +1071,10 @@ void apiShelly() {
   if(fallback)e["fallback"]=fallback;
   if(!appendRecord(e)) {error(507,"Bezug nicht gespeichert");return;}
   rememberBrewRef(ref);
+  if(age>=0 && uint64_t(age)<=b.received) {
+    powerHistory.advance(b.received/1000);
+    powerHistory.markBrew(b.uptime/1000);
+  }
   if(b.live && !backlightOn) {
     backlightTimer.chip(millis());
     serviceBacklight();
@@ -1265,6 +1284,47 @@ void apiExport() {
   web.sendContent("");
 }
 
+void apiPowerHistory() {
+  if(!auth())return;
+  uint32_t now=uptimeMs()/1000;
+  int64_t epoch=epochNow();
+  powerHistory.advance(now);
+  const uint32_t oldest=cafe::PowerHistory::oldest(now);
+  uint32_t first=oldest;
+  if(web.arg("session")==session && web.hasArg("since")) {
+    uint32_t since=strtoul(web.arg("since").c_str(),nullptr,10);
+    // Re-read the tail because the latest heartbeat can fill earlier seconds.
+    if(since<=now && since>45)first=std::max(first,since-45);
+  }
+  if(web.hasArg("download"))
+    web.sendHeader("Content-Disposition","attachment; filename=Cafe_R107_Leistung.csv");
+  web.sendHeader("Cache-Control","no-store");
+  web.sendHeader("X-Cafe-Session",session);
+  web.sendHeader("X-Cafe-Uptime",String(now));
+  web.sendHeader("X-Cafe-Epoch",String(static_cast<unsigned long>(epoch)));
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);web.send(200,"text/csv; charset=utf-8","");
+  web.sendContent("uptime_s;epoch;leistung_W;phase;kaffee\r\n");
+  static const char* phases[]={"","idle","grinding","waiting","brewing"};
+  String chunk;chunk.reserve(1024);
+  for(uint32_t second=oldest;second<=now;++second) {
+    auto sample=powerHistory.get(second);
+    if(!sample.flags || (second<first && !(sample.flags&cafe::PowerHistory::Brew)))continue;
+    chunk+=String(second);chunk+=';';
+    if(epoch)chunk+=String(static_cast<unsigned long>(epoch-(now-second)));
+    chunk+=';';
+    if(sample.wattsPlusOne)chunk+=String(sample.wattsPlusOne-1);
+    chunk+=';';chunk+=phases[sample.flags&0x0f];chunk+=';';
+    if(sample.flags&cafe::PowerHistory::Brew)chunk+='1';
+    chunk+="\r\n";
+    if(chunk.length()>=960) {
+      if(!web.client().connected())return;
+      web.sendContent(chunk);chunk="";yield();
+    }
+  }
+  if(chunk.length())web.sendContent(chunk);
+  web.sendContent("");
+}
+
 uint32_t fmFlags(fs::FS&,String,uint32_t flags) {
   if(flags & ESPFMfGK::flagIsValidAction)return flags & ~ESPFMfGK::flagIsValidAction;
   if(flags & ESPFMfGK::flagIsValidTargetFilename)return flags & ~ESPFMfGK::flagIsValidTargetFilename;
@@ -1274,6 +1334,7 @@ uint32_t fmFlags(fs::FS&,String,uint32_t flags) {
 void setupWeb() {
   const char* headers[]={"X-Cafe-Request","X-Cafe-Shelly"};web.collectHeaders(headers,2);
   web.on("/api/shelly",HTTP_POST,apiShelly);
+  web.on("/api/power.csv",HTTP_GET,apiPowerHistory);
   web.on("/api/restart",HTTP_GET,apiRestart);
   web.on("/api/restart",HTTP_POST,apiRestart);
   web.on("/api/display",HTTP_GET,apiDisplayGet);
