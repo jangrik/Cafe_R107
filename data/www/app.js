@@ -77,10 +77,48 @@ async function loadReport(){
 async function loadHistory(){
   const d=await api('history'+(before?'?before='+before:'')),target=$('#history');target.replaceChildren();oldest=null;
   for(const r of d.rows){oldest=r.id;const row=el('tr');row.append(el('td',displayTime(r.epoch)),el('td',r.name),el('td',r.cancelled?'Storniert':'+1 Kaffee'));const td=el('td');
+    if(!r.cancelled && r.person===''){
+      const assign=el('button','Zuordnen','secondary');assign.type='button';
+      assign.addEventListener('click',()=>openCoffeeAssignment(r));td.append(assign,' ');
+    }
     if(!r.cancelled){const b=el('button','Stornieren','secondary');b.type='button';b.addEventListener('click',()=>action(b,async()=>{if(!confirm(`Buchung #${r.id} für ${r.name} stornieren?`))return;await api('cancel',{id:r.id});await Promise.all([loadReport(),loadHistory()]);notify('Buchung storniert.');}));td.append(b);}row.append(td);target.append(row);}
   if(!d.rows.length)empty(target,'Noch keine Buchungen.',4);$('#older').hidden=!d.more;
 }
 function personSelect(current){const s=el('select');s.setAttribute('aria-label','Person zuordnen');const blank=el('option','Person auswählen …');blank.value='';s.append(blank);for(const p of registry.people){const o=el('option',p.name);o.value=p.id;s.append(o);}s.value=current||'';return s;}
+function openCoffeeAssignment(row){
+  const dialog=el('dialog');
+  const title=el('h3','Kaffeebezug zuordnen');
+  const form=el('form');
+  const select=personSelect('');
+  select.required=true;
+  const label=el('label','Person');label.append(select);
+  const save=el('button','Speichern');save.type='submit';
+  save.disabled=!registry.people.length;
+  const cancel=el('button','Abbrechen','secondary');cancel.type='button';
+  const error=el('p',registry.people.length?'':'Lege zuerst eine Person unter „Personen & Chips“ an.','hint');
+  error.setAttribute('role','status');
+  form.append(label,error,save,cancel);
+  dialog.append(title,el('p',displayTime(row.epoch)+' · Bezug #'+row.id),form);
+  dialog.setAttribute('aria-label',title.textContent);
+  cancel.addEventListener('click',()=>dialog.close());
+  dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    save.disabled=true;cancel.disabled=true;select.disabled=true;
+    try{
+      await api('coffee/assign',{id:row.id,person:select.value});
+    }catch(e){
+      error.textContent=e.message;
+      save.disabled=false;cancel.disabled=false;select.disabled=false;
+      return;
+    }
+    dialog.close();
+    notify('Kaffeebezug zugeordnet.');
+    try{await Promise.all([loadReport(),loadHistory()]);}catch(e){notify(e.message,true);}
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+}
 function chipRow(uid,person,unknown=false){const row=el('div',undefined,'editrow');const identity=el('div',undefined,'chipidentity');identity.append(el('code',uid),el('small',displayChipTime(registry.lastSeen?.[uid]),'chiptime'));row.append(identity);const select=personSelect(person);row.append(select);const assign=el('button',unknown?'Zuordnen':'Ändern');assign.type='button';assign.addEventListener('click',()=>action(assign,async()=>{if(!select.value)throw new Error('Bitte eine Person auswählen.');await api('assign',{uid,person:select.value});await loadRegistry();await refresh();notify('Chip zugeordnet. Der nächste Chipkontakt wird für die Kaffeeerfassung verwendet.');}));row.append(assign);const forget=el('button',unknown?'Verwerfen':'Entfernen','secondary');forget.type='button';forget.addEventListener('click',()=>action(forget,async()=>{if(!confirm('Chip-Zuordnung entfernen? Alte Buchungen bleiben erhalten.'))return;await api('forget',{uid});await loadRegistry();notify('Chip entfernt.');}));row.append(forget);return row;}
 async function loadRegistry(){
   registry=await api('registry');const p=$('#pending'),c=$('#cardList'),list=$('#personList');p.replaceChildren();c.replaceChildren();list.replaceChildren();

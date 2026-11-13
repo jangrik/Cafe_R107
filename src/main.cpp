@@ -92,6 +92,7 @@ std::vector<Card> cards;
 std::vector<Pending> pending;
 std::map<String,Anchor> anchors;
 std::set<uint32_t> cancellations;
+std::map<uint32_t,String> coffeeAssignments;
 String session, storageError;
 using cafe::SHELLY_GRACE_MS;using cafe::SHELLY_ALARM_MS;using cafe::TOKEN_RESERVATION_MS;
 struct Brew {
@@ -567,7 +568,7 @@ bool scanJournal(const std::function<void(JsonDocument&)>& visit) {
     JsonDocument d;
     if(!newline || !line.length() || deserializeJson(d,line)) return false;
     String kind=d["kind"].as<String>();
-    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock" && kind!="brew" && kind!="reservation")) return false;
+    if(!d["id"].is<uint32_t>() || d["id"].as<uint32_t>()==0 || (kind!="coffee" && kind!="cancel" && kind!="clock" && kind!="brew" && kind!="reservation" && kind!="coffee_assignment")) return false;
     visit(d); serviceBuzzer(); delay(0);
   }
   return true;
@@ -605,6 +606,11 @@ void loadJournal() {
     } else if(kind=="cancel") {
       uint32_t target=d["target"]|0U; if(!target || target>=id) valid=false;
       cancellations.insert(target);
+    } else if(kind=="coffee_assignment") {
+      uint32_t target=d["target"]|0U;
+      String person=d["person"]|"";
+      if(!target || target>=id || !person.length() ||
+          cancellations.count(target) || !coffeeAssignments.emplace(target,person).second)valid=false;
     } else if(kind=="brew") {
       String ref=d["ref"]|"";
       if(!ref.length() || receivedBrews.count(ref) || !d["session"].is<String>() ||
@@ -638,6 +644,12 @@ void loadJournal() {
   }) && valid;
   if(!journalOK) storageError="Journal beschaedigt: sichern und pruefen";
 }
+String coffeePerson(JsonDocument& coffee) {
+  String original=coffee["person"].as<String>();
+  if(original.length())return original;
+  auto assignment=coffeeAssignments.find(coffee["id"].as<uint32_t>());
+  return assignment==coffeeAssignments.end()?original:assignment->second;
+}
 int64_t recordEpoch(JsonDocument& d) {
   String boot=d["session"].as<String>(); auto it=anchors.find(boot);
   Anchor a; if(it!=anchors.end()) a=it->second;
@@ -667,8 +679,8 @@ void rankingScreen(cafe::RankingPeriod period) {
   if(readable && !timeMissing) {
     readable=scanJournal([&](JsonDocument& e){
       if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
-      if(!e["person"].as<String>().length())return;
-      if(cafe::inRankingPeriod(recordEpoch(e),now,period)) ++counts[e["person"].as<String>()];
+      String person=coffeePerson(e);
+      if(person.length() && cafe::inRankingPeriod(recordEpoch(e),now,period)) ++counts[person];
     });
     if(!readable) { journalOK=false; storageError="Journal nicht lesbar"; }
   }
@@ -1176,7 +1188,7 @@ void apiReport() {
   cafe::Counts total;
   bool ok=scanJournal([&](JsonDocument& e) {
     if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
-    int64_t t=recordEpoch(e);String id=e["person"].as<String>();
+    int64_t t=recordEpoch(e);String id=coffeePerson(e);
     counts[id].add(t,now);total.add(t,now);
     if(t) {
       String wk=cafe::weekKey(t).c_str(), mo=cafe::monthKey(t).c_str(); weeks.insert(wk);months.insert(mo);
@@ -1187,7 +1199,7 @@ void apiReport() {
   for(auto& p:counts) {p.second.week=0;p.second.month=0;}total.week=0;total.month=0;
   ok=scanJournal([&](JsonDocument& e) {
     if(e["kind"]!="coffee" || cancellations.count(e["id"].as<uint32_t>())) return;
-    int64_t t=recordEpoch(e);if(!t) return; String id=e["person"].as<String>();
+    int64_t t=recordEpoch(e);if(!t) return; String id=coffeePerson(e);
     if(week.length() && week==cafe::weekKey(t).c_str()) {++counts[id].week;++total.week;}
     if(month.length() && month==cafe::monthKey(t).c_str()) {++counts[id].month;++total.month;}
   });
@@ -1207,13 +1219,46 @@ void apiHistory() {
   struct Row {uint32_t id;String person;int64_t epoch;bool cancelled;};std::vector<Row> rows;bool more=false;
   bool ok=scanJournal([&](JsonDocument& e){
     uint32_t id=e["id"]|0U;if(e["kind"]!="coffee" || id>=before)return;
-    rows.push_back({id,e["person"].as<String>(),recordEpoch(e),bool(cancellations.count(id))});
+    rows.push_back({id,coffeePerson(e),recordEpoch(e),bool(cancellations.count(id))});
     if(rows.size()>50) {rows.erase(rows.begin());more=true;}
   });
   if(!ok) {error(503,"Journal nicht lesbar");return;}
   JsonDocument d;d["more"]=more;auto arr=d["rows"].to<JsonArray>();
   for(auto it=rows.rbegin();it!=rows.rend();++it){auto o=arr.add<JsonObject>();o["id"]=it->id;o["person"]=it->person;o["name"]=personName(it->person);o["epoch"]=it->epoch;o["cancelled"]=it->cancelled;}
   sendJson(d);
+}
+void apiAssignCoffee() {
+  if(!auth(true) || !writable())return;
+  JsonDocument request;if(!body(request))return;
+  uint32_t target=request["id"]|0U;
+  String person=request["person"]|"";
+  if(!target || !personExists(person)) {error(400,"Ungueltiger Bezug oder unbekannte Person");return;}
+  if(cancellations.count(target)) {error(409,"Bezug ist storniert");return;}
+
+  JsonDocument reply;reply["ok"]=true;
+  auto existing=coffeeAssignments.find(target);
+  if(existing!=coffeeAssignments.end()) {
+    if(existing->second==person)sendJson(reply);
+    else error(409,"Bezug ist bereits zugeordnet");
+    return;
+  }
+
+  bool found=false, unassigned=false;
+  bool readable=scanJournal([&](JsonDocument& coffee){
+    if(coffee["kind"]=="coffee" && coffee["id"].as<uint32_t>()==target) {
+      found=true;
+      unassigned=!coffee["person"].as<String>().length();
+    }
+  });
+  if(!readable) {error(503,"Journal nicht lesbar");return;}
+  if(!found) {error(404,"Bezug nicht gefunden");return;}
+  if(!unassigned) {error(409,"Bezug ist bereits zugeordnet");return;}
+
+  JsonDocument entry;entry["kind"]="coffee_assignment";entry["target"]=target;entry["person"]=person;
+  entry["epoch"]=epochNow();entry["session"]=session;entry["uptime"]=uptimeMs();
+  if(!appendRecord(entry)) {error(507,"Zuordnung nicht gespeichert");return;}
+  coffeeAssignments.emplace(target,person);
+  sendJson(reply);
 }
 void apiCancel() {
   if(!auth(true) || !writable())return;JsonDocument d;if(!body(d))return;uint32_t target=d["id"]|0U;
@@ -1276,9 +1321,10 @@ void apiExport() {
   web.sendContent("\xEF\xBB\xBFid;person_id;name;zeit_berlin;epoch;storniert\r\n");
   scanJournal([&](JsonDocument& e){
     if(e["kind"]!="coffee")return;uint32_t id=e["id"]|0U;int64_t t=recordEpoch(e);
-    String name=personName(e["person"].as<String>());name.replace("\"","\"\"");
+    String person=coffeePerson(e);
+    String name=personName(person);name.replace("\"","\"\"");
     if(name.startsWith("=")||name.startsWith("+")||name.startsWith("-")||name.startsWith("@"))name="'"+name;
-    String line=String(id)+";"+e["person"].as<String>()+";\""+name+"\";"+cafe::dateKey(t,"%Y-%m-%d %H:%M:%S").c_str()+";";
+    String line=String(id)+";"+person+";\""+name+"\";"+cafe::dateKey(t,"%Y-%m-%d %H:%M:%S").c_str()+";";
     if(t)line+=String(static_cast<unsigned long>(t));line+=";";line+=cancellations.count(id)?"ja":"nein";line+="\r\n";web.sendContent(line);
   });
   web.sendContent("");
@@ -1352,6 +1398,7 @@ void setupWeb() {
   web.on("/api/status",HTTP_GET,apiStatus);web.on("/api/registry",HTTP_GET,apiRegistry);
   web.on("/api/report",HTTP_GET,apiReport);web.on("/api/history",HTTP_GET,apiHistory);
   web.on("/api/person",HTTP_POST,apiPerson);web.on("/api/assign",HTTP_POST,apiAssign);
+  web.on("/api/coffee/assign",HTTP_POST,apiAssignCoffee);
   web.on("/api/forget",HTTP_POST,apiForget);web.on("/api/cancel",HTTP_POST,apiCancel);
   web.on("/api/time",HTTP_POST,apiTime);web.on("/api/config",HTTP_POST,apiConfig);
   web.on("/api/export.csv",HTTP_GET,apiExport);

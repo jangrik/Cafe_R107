@@ -1,4 +1,4 @@
-# Cafe R107 · Version 1.1.5
+# Cafe R107 · Version 1.1.6
 
 RFID-Kaffeeerfassung für ein kleines Büro: ESP32, RC522, Waveshare ST7789
 240 × 240 und passiver elektromagnetischer Summer. PlatformIO/Arduino,
@@ -9,6 +9,18 @@ Weboberfläche und Daten in LittleFS. Kein Eingriff in die Espressomaschine.
 [HTTP-API](#vollständige-http-api-stand-1014) ·
 [Pinbelegung](#hardware--funktionierende-pinbelegung) ·
 [Sicherung und Updates](#littlefs-sicherung-und-updates)
+
+## Neu in 1.1.6
+
+Unter **Übersicht → Die letzten Buchungen** lässt sich ein Bezug mit
+„Ohne Zuordnung“ über **Zuordnen** einer vorhandenen Person zuweisen.
+Auch ältere, nicht stornierte Bezüge können zugeordnet werden. Der ESP
+hängt einen Journaleintrag an und verwendet die Zuordnung in Verlauf,
+Statistik, Rangliste und CSV. Die ursprüngliche Bezugs-ID und Bezugszeit
+bleiben erhalten.
+
+Für das Update von 1.1.5 die Firmware aktualisieren und `data/www/app.js`
+im Dateimanager als `/www/app.js` ersetzen. Danach die Seite neu laden.
 
 ## Neu in 1.1.5
 
